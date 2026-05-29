@@ -128,8 +128,8 @@ async def _spawn_worker(session_id: str):
 The handler `await`s the spawn so the inbound webhook connection stays open while the worker is created and the poller starts; that keeps the orchestrator sandbox active during the spawn instead of standbying mid-flight. Once the worker is polling, it holds *itself* active via `keep_alive`. `session.status_run_started` fires once per turn, so later turns reuse the same per-session sandbox (`create_if_not_exists` is idempotent) and just restart the poller. See `orchestrator/app.py` for the full handler. Build and bring it up (creates the sandbox, starts uvicorn, exposes a public preview):
 
 ```bash
-cd orchestrator && bl push --type sandbox
-python setup.py   # prints the public preview webhook URL
+(cd orchestrator && bl push --type sandbox)   # build + push the orchestrator image
+python setup.py                               # run from the repo root: creates the sandbox, prints the webhook URL
 ```
 
 The orchestrator runs with `BL_API_KEY` and `BL_WORKSPACE` in its env so the in-sandbox SDK can spawn workers. Unlike a Blaxel Agent, a sandbox does not inherit a workspace identity, so you provide the service-account key.
@@ -161,6 +161,7 @@ The environment is selected per session (`environment_id` on session create), no
 ## Gotchas (validated)
 
 - **Standby and keep-alive (the big one).** A Blaxel sandbox standbys ~15s after its last *inbound* connection, snapshotting process and filesystem (and resuming in ms). The worker poller only makes *outbound* calls, so without intervention the worker standbys mid-session and the poll loop freezes. Launch the poller with `keep_alive: True` and a `timeout` cap (or `0` to run until it exits naturally) so the sandbox stays active until the session is done. The orchestrator handles its webhook *synchronously*, so the open inbound connection keeps it active during the spawn; it then standbys and resumes on the next webhook.
+- **Webhook verification needs `anthropic[webhooks]`.** The orchestrator calls `client.beta.webhooks.unwrap()`; with plain `anthropic` it raises "install anthropic[webhooks]" and every delivery 401s (the request is fine, the dependency is missing). The extra is pinned in `orchestrator/requirements.txt`.
 - **The worker image is the agent's runtime.** Whatever the agent executes (python, node, compilers, CLIs) must be installed in the worker image. The default ships `node` (from the base) and `python3`; extend the worker Dockerfile with the languages and tools your agents need.
 - **`bash` needs `/bin/bash`.** The Debian base includes it (Alpine would not); skill download also needs `unzip` and `tar`.
 - **Working directory.** The worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so tool file access stays contained to `/workspace` and a prompt-injected tool call can't read or write outside the project root. Tell the agent to use absolute `/workspace` paths (the sample agent's system prompt does) so the `write` tool and `bash`'s cwd agree. `--unrestricted-paths` removes that containment; only add it if your agent genuinely needs to touch paths outside `/workspace`, and understand the exposure first.
