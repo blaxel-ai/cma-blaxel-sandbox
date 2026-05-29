@@ -1,12 +1,21 @@
-FROM node:22-alpine
+# Debian (glibc) base, not Alpine (musl): the worker image is where the agent
+# executes code, and on musl a routine `pip install numpy/pandas` falls back to
+# slow/failing source builds. glibc gets real manylinux wheels. node comes from
+# the base image; bash is already present (Alpine would lack it).
+FROM node:22-bookworm-slim
 
 COPY --from=ghcr.io/blaxel-ai/sandbox:latest /sandbox-api /usr/local/bin/sandbox-api
 
-# bash: the agent_toolset `bash` tool requires /bin/bash at that exact path.
-# unzip + tar: required by the ant SDK helpers for skill download.
-RUN apk update && apk add --no-cache \
-	git curl tar bash unzip \
-  && rm -rf /var/cache/apk/*
+# The worker image is the agent's execution environment, so it ships the runtimes
+# and tools the agent uses. python3 + pip is the common second runtime (node is in
+# the base). netcat-openbsd backs the port wait in entrypoint.sh; unzip/tar/git/curl
+# support skill download and general use. Removing EXTERNALLY-MANAGED lets the agent
+# `pip install` freely in this disposable sandbox. Extend this list for your stack.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git curl ca-certificates tar unzip netcat-openbsd \
+      python3 python3-pip python-is-python3 \
+  && rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED \
+  && rm -rf /var/lib/apt/lists/*
 
 # ant CLI version (the worker binary). Override with --build-arg ANT_VERSION=...
 ARG ANT_VERSION=1.10.0

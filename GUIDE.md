@@ -55,12 +55,16 @@ export ANTHROPIC_ENVIRONMENT_KEY=sk-ant-oat01-...
 
 ## 2. Build the worker image
 
-The worker is a Blaxel sandbox image with the Blaxel sandbox API and the `ant` CLI. **It must include `/bin/bash`**, because the agent toolset's `bash` tool requires it at that exact path, plus `unzip` and `tar` for skill download.
+The worker is a Blaxel sandbox image with the Blaxel sandbox API and the `ant` CLI, built on a glibc base so the agent's `pip` installs get real manylinux wheels (numpy, pandas, and so on) instead of musl source builds. The agent toolset's `bash` tool needs `/bin/bash`, which the Debian base provides; skill download needs `unzip` and `tar`. node comes from the base and `python3` is the common second runtime.
 
 ```dockerfile
-FROM node:22-alpine
+FROM node:22-bookworm-slim
 COPY --from=ghcr.io/blaxel-ai/sandbox:latest /sandbox-api /usr/local/bin/sandbox-api
-RUN apk add --no-cache git curl tar bash unzip
+# glibc base; node is in the base, bash is native. Add the runtimes your agents use.
+# Removing EXTERNALLY-MANAGED lets the agent pip install freely in this disposable box.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git curl ca-certificates tar unzip netcat-openbsd python3 python3-pip python-is-python3 \
+    && rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED && rm -rf /var/lib/apt/lists/*
 
 ARG ANT_VERSION=1.10.0
 ARG TARGETARCH=amd64
@@ -152,7 +156,8 @@ The environment is selected per session (`environment_id` on session create), no
 
 ## Gotchas (validated)
 
-- **`bash` needs `/bin/bash`.** The Alpine base lacks it; install `bash` (and `unzip`, `tar`).
+- **The worker image is the agent's runtime.** Whatever the agent executes (python, node, compilers, CLIs) must be installed in the worker image. The default ships `node` (from the base) and `python3`; extend the worker Dockerfile with the languages and tools your agents need.
+- **`bash` needs `/bin/bash`.** The Debian base includes it (Alpine would not); skill download also needs `unzip` and `tar`.
 - **Working directory.** Run the worker with `--unrestricted-paths` and have the agent use absolute `/workspace` paths, otherwise the `write` tool's base (`/`) and `bash`'s cwd (`/workspace`) disagree and the agent wastes turns reconciling them.
 - **Sandbox names.** Blaxel sandbox names must be lowercase alphanumerics and hyphens; session ids (`sesn_01Ab…`) contain underscores and mixed case, so sanitize before naming a worker.
 - **Orchestrator credential.** A sandbox does not get an auto-injected Blaxel identity (an Agent does), so pass a service-account `BL_API_KEY`.

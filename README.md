@@ -13,7 +13,7 @@ The narrative walkthrough is in **[GUIDE.md](./GUIDE.md)**.
 
 ```
 orchestrator/   app.py (webhook -> spawn worker), Dockerfile, requirements.txt, blaxel.toml
-worker/         Dockerfile (sandbox-api + ant + bash/unzip), entrypoint.sh, blaxel.toml
+worker/         Dockerfile (sandbox-api + ant + node/python3), entrypoint.sh, blaxel.toml
 example/        run_session.py: create a session + watch it run
 setup.py        bring up the orchestrator sandbox and print its public webhook URL
 GUIDE.md        the integration guide (prose)
@@ -100,7 +100,8 @@ python example/run_session.py
 
 ## Gotchas (validated)
 
-- **`bash` needs `/bin/bash`:** the Alpine base lacks it, so the worker image installs `bash` (plus `unzip`, `tar` for skill download).
+- **The worker image is the agent's runtime.** Whatever the agent executes (python, node, compilers, CLIs) must be installed in the worker image. The default ships `node` (from the base) and `python3`; extend the worker Dockerfile with the languages and tools your agents need.
+- **`bash` needs `/bin/bash`:** the Debian base includes it (Alpine would not); skill download also needs `unzip` and `tar`.
 - **Working directory:** run the worker with `--unrestricted-paths` and have the agent use absolute `/workspace` paths, so the `write` tool's base and `bash`'s cwd agree.
 - **Sandbox names:** must be lowercase alphanumerics and hyphens, so session ids (`sesn_01Ab…`) are sanitized before use as a worker name.
 - **Orchestrator credential:** pass a service-account `BL_API_KEY`; sandboxes do not get an auto-injected Blaxel identity.
