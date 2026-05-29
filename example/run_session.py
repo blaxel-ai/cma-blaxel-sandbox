@@ -17,6 +17,7 @@ For --local-worker, also:
     BL_REGION                  optional, e.g. us-pdx-1
 """
 import argparse, asyncio, json, os, urllib.request, urllib.error
+from uuid import uuid4
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 WORKER_IMAGE = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest")
@@ -76,8 +77,9 @@ async def spawn_local_worker(session_id):
             break
         except Exception:
             await asyncio.sleep(2)
+    process_name = f"ant-poll-{uuid4().hex[:8]}"
     await worker.process.exec({
-        "name": "ant-poll",
+        "name": process_name,
         "command": f"ant beta:worker poll --workdir /workspace --max-idle {WORKER_MAX_IDLE}",
         "wait_for_completion": False,
         # keep_alive holds the sandbox active for the whole session; without it the
@@ -85,14 +87,15 @@ async def spawn_local_worker(session_id):
         "keep_alive": True,
         "timeout": int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600")),
     })
-    print(f"[local-worker] {spec['name']} is polling the queue")
+    print(f"[local-worker] {spec['name']} is polling the queue as {process_name}")
 
 
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--message", default=(
-        "Write the file /workspace/hello.txt containing exactly 'hello from blaxel', "
-        "then run 'cat /workspace/hello.txt' and report its contents."))
+        "Important: do not use any absolute path with the write tool. First, call the write tool "
+        "with file_path exactly hello.txt and content exactly 'hello from blaxel'. Then run the "
+        "shell command 'cat /workspace/hello.txt' and report its output."))
     ap.add_argument("--local-worker", action="store_true",
                     help="spawn the worker directly instead of relying on the webhook + orchestrator")
     args = ap.parse_args()

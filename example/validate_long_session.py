@@ -22,6 +22,7 @@ ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REG
     python3 example/validate_long_session.py --no-local-worker   # rely on webhook + orchestrator
 """
 import argparse, asyncio, json, os, time, urllib.request, urllib.error
+from uuid import uuid4
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 WORKER_IMAGE = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest")
@@ -94,14 +95,15 @@ async def spawn_local_worker(session_id):
             await asyncio.sleep(2)
     # FIXED launch: no --unrestricted-paths (contained to /workspace) + keep_alive
     # so the sandbox stays active for the whole multi-minute turn.
+    process_name = f"ant-poll-{uuid4().hex[:8]}"
     await worker.process.exec({
-        "name": "ant-poll",
+        "name": process_name,
         "command": f"ant beta:worker poll --workdir /workspace --max-idle {WORKER_MAX_IDLE}",
         "wait_for_completion": False,
         "keep_alive": True,
         "timeout": KEEPALIVE_TIMEOUT,
     })
-    print(f"[local-worker] {spec['name']} polling (keep_alive=True, no --unrestricted-paths)")
+    print(f"[local-worker] {spec['name']} polling as {process_name} (keep_alive=True, no --unrestricted-paths)")
 
 
 async def main():

@@ -4,7 +4,7 @@ preview URL, and the running server survives standby and resumes LIVE — the
 same process, not a cold reboot. No other CMA sandbox provider can show this.
 
 Flow:
-  1. Create a session; the agent uses its write tool to author /workspace/app.py.
+  1. Create a session; the agent uses its write tool to author app.py in /workspace.
   2. The harness starts that app as a long-lived sandbox process on :3000 (CMA
      tool calls are request-scoped, so a server must be supervised, not
      backgrounded inside one tool call) and exposes it on a public preview URL.
@@ -17,6 +17,7 @@ ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REG
 Run: python example/demo_preview_resume.py
 """
 import asyncio, json, os, time, urllib.request, urllib.error
+from uuid import uuid4
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 WORKER_IMAGE = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest")
@@ -95,11 +96,12 @@ async def main():
             await worker.process.exec({"name": f"probe{i}", "command": "node -v", "wait_for_completion": True}); break
         except Exception:
             await asyncio.sleep(2)
+    process_name = f"ant-poll-{uuid4().hex[:8]}"
     await worker.process.exec({
-        "name": "ant-poll", "command": "ant beta:worker poll --workdir /workspace --max-idle 120s",
+        "name": process_name, "command": "ant beta:worker poll --workdir /workspace --max-idle 120s",
         "wait_for_completion": False, "keep_alive": True,
         "timeout": int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))})
-    print(f"worker {spec['name']} polling")
+    print(f"worker {spec['name']} polling as {process_name}")
 
     print("\n[1/3] waiting for the agent to author /workspace/app.py ...")
     deadline = time.monotonic() + 240

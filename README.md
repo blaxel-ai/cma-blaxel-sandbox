@@ -68,7 +68,7 @@ export ANTHROPIC_ENVIRONMENT_KEY=sk-ant-oat01-...
 export ANTHROPIC_AGENT_ID=$(curl -sS https://api.anthropic.com/v1/agents \
   -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
   -H "anthropic-beta: managed-agents-2026-04-01" -H "content-type: application/json" \
-  -d '{"name":"Coding Assistant","model":"claude-opus-4-8","system":"You are a coding agent. Your working directory is /workspace; use absolute /workspace paths. Every tool call must produce non-empty output: if a shell command would print nothing (for example output redirected to a file), append a status echo such as && echo ok, because an empty tool result is rejected by the API.","tools":[{"type":"agent_toolset_20260401"}]}' \
+  -d '{"name":"Coding Assistant","model":"claude-opus-4-8","system":"You are a coding agent. Your working directory is /workspace. Use relative paths only for file tools; never pass /workspace/... to file tools. Use /workspace/... paths in shell commands. Every tool call must produce non-empty output: if a shell command would print nothing (for example output redirected to a file), append a status echo such as && echo ok, because an empty tool result is rejected by the API.","tools":[{"type":"agent_toolset_20260401"}]}' \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 echo "agent: $ANTHROPIC_AGENT_ID"
 ```
@@ -104,7 +104,7 @@ python example/run_session.py
 
 - **The worker image is the agent's runtime.** Whatever the agent executes (python, node, compilers, CLIs) must be installed in the worker image. The default ships `node` (from the base) and `python3`; extend the worker Dockerfile with the languages and tools your agents need.
 - **`bash` needs `/bin/bash`:** the Debian base includes it (Alpine would not); skill download also needs `unzip` and `tar`.
-- **Working directory & keep-alive (the big one):** the worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so tool file access stays contained to `/workspace`. Launch the poller with `keep_alive: True` plus a `timeout` cap: Blaxel sandboxes standby ~15s after the last inbound connection, and the poller only makes outbound calls, so without keep-alive the worker freezes mid-session. Tell the agent to use absolute `/workspace` paths so the `write` tool and `bash`'s cwd agree.
+- **Working directory & keep-alive (the big one):** the worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so file tools stay contained to `/workspace`. Tell the agent to use relative paths only for file tools and `/workspace/...` paths in shell commands. Launch the poller with `keep_alive: True` plus a `timeout` cap: Blaxel sandboxes standby ~15s after the last inbound connection, and the poller only makes outbound calls, so without keep-alive the worker freezes mid-session.
 - **Sandbox names:** must be lowercase alphanumerics and hyphens, so session ids (`sesn_01Ab…`) are sanitized before use as a worker name.
 - **Orchestrator credential:** pass a service-account `BL_API_KEY`; sandboxes do not get an auto-injected Blaxel identity.
 - **Duplicate webhooks / later turns:** Anthropic can retry `session.status_run_started`, and the same session can get later turns. The orchestrator serializes starts per session, skips duplicate starts for the `ANT_MAX_IDLE` window (override with `ANT_RESTART_COOLDOWN`), and uses a unique poller process name for each real restart so completed process records do not block later turns.
