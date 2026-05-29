@@ -2,6 +2,8 @@
 
 Claude Managed Agents (CMA) lets Anthropic run the agent loop (the model, tool-calling, skills, and memory) while **tool execution happens on infrastructure you control**. When Claude decides to run a tool, something on your side has to execute it and post the result back. This guide shows how to make that "something" a **Blaxel sandbox**: a secure microVM that scales to zero when idle and resumes in milliseconds.
 
+This is the **self-hosted / advanced reference** path for teams that want to own the webhook control plane themselves.
+
 ## Architecture
 
 Anthropic hosts the brain; Blaxel provides the hands. Two roles, both Blaxel sandboxes:

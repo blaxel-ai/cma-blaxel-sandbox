@@ -1,6 +1,8 @@
 # Claude Managed Agents on Blaxel: self-hosted sandbox cookbook
 
-Run Claude Managed Agents (CMA) tool execution on **Blaxel sandboxes**. Both roles in the integration are Blaxel sandboxes, with no Blaxel Agent and no platform changes.
+This repo is the **self-hosted / advanced reference** for running Claude Managed Agents (CMA) on Blaxel when you want to own the webhook control plane yourself.
+
+Run CMA tool execution on **Blaxel sandboxes**. Both roles in this self-hosted integration are Blaxel sandboxes, with no Blaxel Agent and no platform changes.
 
 - **Orchestrator** (`orchestrator/`): a sandbox running a FastAPI webhook server on a public **preview URL** (the Anthropic webhook target). On `session.status_run_started` it spawns a worker and returns. It never polls, claims, or babysits.
 - **Worker** (`worker/`): a sandbox running `ant beta:worker poll`. It self-claims the queued session, runs the tool calls in `/workspace`, posts results back to Anthropic, and exits on idle; a TTL auto-cleans it.
