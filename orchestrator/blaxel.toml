@@ -1,0 +1,6 @@
+type = "sandbox"
+name = "cma-orchestrator"
+
+[runtime]
+generation = "mk3"
+memory = 2048
