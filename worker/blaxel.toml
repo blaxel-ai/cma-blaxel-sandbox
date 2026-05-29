@@ -1,0 +1,6 @@
+type = "sandbox"
+name = "cma-worker"
+
+[runtime]
+generation = "mk3"
+memory = 4096
