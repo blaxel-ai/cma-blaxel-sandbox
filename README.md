@@ -105,6 +105,7 @@ python example/run_session.py
 - **Working directory & keep-alive (the big one):** the worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so tool file access stays contained to `/workspace`. Launch the poller with `keep_alive: True` plus a `timeout` cap: Blaxel sandboxes standby ~15s after the last inbound connection, and the poller only makes outbound calls, so without keep-alive the worker freezes mid-session. Tell the agent to use absolute `/workspace` paths so the `write` tool and `bash`'s cwd agree.
 - **Sandbox names:** must be lowercase alphanumerics and hyphens, so session ids (`sesn_01Ab…`) are sanitized before use as a worker name.
 - **Orchestrator credential:** pass a service-account `BL_API_KEY`; sandboxes do not get an auto-injected Blaxel identity.
+- **Duplicate webhooks / later turns:** Anthropic can retry `session.status_run_started`, and the same session can get later turns. The orchestrator serializes starts per session, skips duplicate starts for the `ANT_MAX_IDLE` window (override with `ANT_RESTART_COOLDOWN`), and uses a unique poller process name for each real restart so completed process records do not block later turns.
 - **`--max-idle`** (default `60s`, override with `ANT_MAX_IDLE`): keep it generous enough to span the agent's reasoning between tool calls.
 
 ## Links

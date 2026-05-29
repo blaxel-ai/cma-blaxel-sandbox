@@ -105,7 +105,9 @@ async def webhook(request: Request):
     if event.data.type == "session.status_run_started":
         # Await the spawn: holding the inbound webhook connection open keeps the
         # orchestrator sandbox active during the spawn (no standby mid-flight).
-        await _spawn_worker(event.data.id)   # event.data.id is the session id
+        # The full app also serializes starts per session and skips duplicate
+        # webhook retries while the previous poller is still alive.
+        await _spawn_worker_once(event.data.id)   # event.data.id is the session id
     return {"status": "ok"}
 
 async def _spawn_worker(session_id: str):
@@ -118,6 +120,7 @@ async def _spawn_worker(session_id: str):
                  {"name": "ANTHROPIC_ENVIRONMENT_KEY", "value": ENV_KEY}],
     })
     await worker.process.exec({
+        "name": f"ant-poll-{uuid4().hex[:8]}",  # unique per restart; records persist
         "command": "ant beta:worker poll --workdir /workspace --max-idle 60s",
         "wait_for_completion": False,
         "keep_alive": True,   # hold the sandbox active for the whole session
@@ -125,7 +128,7 @@ async def _spawn_worker(session_id: str):
     })
 ```
 
-The handler `await`s the spawn so the inbound webhook connection stays open while the worker is created and the poller starts; that keeps the orchestrator sandbox active during the spawn instead of standbying mid-flight. Once the worker is polling, it holds *itself* active via `keep_alive`. `session.status_run_started` fires once per turn, so later turns reuse the same per-session sandbox (`create_if_not_exists` is idempotent) and just restart the poller. See `orchestrator/app.py` for the full handler. Build and bring it up (creates the sandbox, starts uvicorn, exposes a public preview):
+The handler `await`s the spawn so the inbound webhook connection stays open while the worker is created and the poller starts; that keeps the orchestrator sandbox active during the spawn instead of standbying mid-flight. Once the worker is polling, it holds *itself* active via `keep_alive`. `session.status_run_started` fires once per turn and may be retried, so the full handler serializes starts per session, skips duplicate starts during the poller's idle window, and uses a fresh process name for each real restart. Later turns reuse the same per-session sandbox (`create_if_not_exists` is idempotent) and restart the poller cleanly after the previous one idles out. See `orchestrator/app.py` for the full handler. Build and bring it up (creates the sandbox, starts uvicorn, exposes a public preview):
 
 ```bash
 (cd orchestrator && bl push --type sandbox)   # build + push the orchestrator image
@@ -167,6 +170,7 @@ The environment is selected per session (`environment_id` on session create), no
 - **Working directory.** The worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so tool file access stays contained to `/workspace` and a prompt-injected tool call can't read or write outside the project root. Tell the agent to use absolute `/workspace` paths (the sample agent's system prompt does) so the `write` tool and `bash`'s cwd agree. `--unrestricted-paths` removes that containment; only add it if your agent genuinely needs to touch paths outside `/workspace`, and understand the exposure first.
 - **Sandbox names.** Blaxel sandbox names must be lowercase alphanumerics and hyphens; session ids (`sesn_01Ab…`) contain underscores and mixed case, so sanitize before naming a worker.
 - **Orchestrator credential.** A sandbox does not get an auto-injected Blaxel identity (an Agent does), so pass a service-account `BL_API_KEY`.
+- **Duplicate webhooks / later turns.** Anthropic can retry `session.status_run_started`, and the same session can get later turns. The orchestrator serializes starts per session, skips duplicate starts for the `ANT_MAX_IDLE` window (override with `ANT_RESTART_COOLDOWN`), and uses a unique poller process name for each real restart so completed process records do not block later turns.
 - **Worker `--max-idle`** (default `60s`, override with `ANT_MAX_IDLE`) should be generous enough to span the agent's reasoning between tool calls.
 - **Tool output must be non-empty.** A shell command that prints nothing (e.g. `echo A > file`, which redirects stdout) makes the worker post an empty tool result, which the API rejects with `400 … minimum string length is 1` and the session stalls. Have the agent append a status echo (the sample system prompt asks for this), or wrap commands so they always emit something.
 - **Retrieving outputs.** Tool writes land in `/workspace`; the agent's final artifacts go to `/mnt/session/outputs`. Nothing is auto-exported — read them back through the sandbox filesystem API (`sandbox.fs.read(...)`) or serve them on a preview URL.
