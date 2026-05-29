@@ -75,7 +75,7 @@ async def main() -> None:
     print("webhook server started")
     await asyncio.sleep(4)
 
-    preview = await sbx.previews.create({
+    preview = await sbx.previews.create_if_not_exists({
         "metadata": {"name": "webhook"},
         "spec": {"port": PORT, "public": True},
     })
