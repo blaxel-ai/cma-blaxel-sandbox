@@ -38,16 +38,21 @@ client = AsyncAnthropic(
 
 # Worker config (all overridable via env).
 worker_image = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest")
-worker_ttl = os.environ.get("BLAXEL_WORKER_TTL", "600s")
+# `ttl` is a max-age from creation: Blaxel deletes the sandbox this long after it is
+# created, regardless of activity. Units are m/h/d/w (NOT seconds). Keep it well above
+# a session's expected length so it never deletes a worker mid-run -- it's a cleanup
+# backstop, not idle-based. For idle-based cleanup, use a `ttl-idle` lifecycle policy
+# instead (see Blaxel docs; not exposed in the installed SDK build).
+worker_ttl = os.environ.get("BLAXEL_WORKER_TTL", "2h")
 # Keep --max-idle generous enough to span the agent's reasoning between tool
 # calls; the worker exits once the queue is quiet for this long.
 worker_max_idle = os.environ.get("ANT_MAX_IDLE", "60s")
+# keep_alive holds the worker sandbox active while the poller runs. Without it the
+# sandbox standbys ~15s after spawn (the poller only makes outbound calls, so there
+# is no inbound connection to hold it active) and the poll loop freezes mid-session.
+# Bounds a stuck session; set ANT_KEEPALIVE_TIMEOUT=0 to run until natural exit.
+worker_keepalive_timeout = int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))
 worker_region = os.environ.get("BL_REGION")
-
-# Keep a reference to each spawn task so it is not garbage-collected mid-flight
-# and so failures are logged rather than silently swallowed.
-_spawn_tasks: set[asyncio.Task] = set()
-
 
 async def _spawn_worker(session_id: str) -> None:
     """Create (or revive) a self-claiming worker sandbox for a session.
@@ -61,9 +66,9 @@ async def _spawn_worker(session_id: str) -> None:
     the first turn creates it; later turns reuse the same sandbox and just
     (re)start the poller below, needed when the previous turn's poller already
     exited on --max-idle. Overlapping pollers are harmless because the queue
-    hands each work item to a single claimer. The TTL auto-deletes the sandbox,
-    so there is no orchestrator-side delete to babysit; keep the TTL larger than
-    the expected gap between a session's turns.
+    hands each work item to a single claimer. The TTL (max-age from creation)
+    auto-deletes the sandbox as a cleanup backstop, so there is no
+    orchestrator-side delete to babysit; keep it well above a session's length.
     """
     safe_id = session_id.replace("_", "-").lower()
     name = f"cma-worker-{safe_id[:40]}"
@@ -88,26 +93,28 @@ async def _spawn_worker(session_id: str) -> None:
 
     # Wait for the in-sandbox API to accept commands, then start the poller
     # detached. `poll` self-claims the queued session, runs its tool calls,
-    # and shuts down after --max-idle. We do NOT wait_for_completion and we do
-    # NOT delete; the worker owns its own lifecycle.
-    for attempt in range(45):
+    # and shuts down after --max-idle. keep_alive holds the sandbox active for
+    # the whole session; without it the sandbox standbys ~15s after spawn and
+    # the poll loop freezes mid-session. We do NOT wait_for_completion and we do
+    # NOT delete; the worker owns its own lifecycle (the TTL handles cleanup once
+    # the poller has exited and the sandbox goes idle).
+    # Bounded so a cold spawn returns within Anthropic's webhook delivery timeout
+    # (calibrate during the validation run); on timeout the delivery is retried and
+    # create_if_not_exists is idempotent, so the retry finishes fast.
+    for attempt in range(20):
         try:
             await worker.process.exec({
                 "name": "ant-poll",
-                "command": f"ant beta:worker poll --workdir /workspace --unrestricted-paths --max-idle {worker_max_idle}",
+                "command": f"ant beta:worker poll --workdir /workspace --max-idle {worker_max_idle}",
                 "wait_for_completion": False,
+                "keep_alive": True,
+                "timeout": worker_keepalive_timeout,
             })
             logger.info("worker %s polling (session %s)", name, session_id)
             return
         except Exception:
             await asyncio.sleep(2)
     logger.error("worker %s never accepted the poll command", name)
-
-
-def _track(coro) -> None:
-    task = asyncio.create_task(coro)
-    _spawn_tasks.add(task)
-    task.add_done_callback(lambda t: (_spawn_tasks.discard(t), t.exception() and logger.error("spawn failed: %r", t.exception())))
 
 
 @asynccontextmanager
@@ -123,18 +130,28 @@ app = FastAPI(lifespan=lifespan)
 @app.post("/webhook")
 async def webhook(request: Request):
     raw = await request.body()
+    if not os.environ.get("ANTHROPIC_WEBHOOK_SIGNING_KEY"):
+        # No signing key yet: say so plainly instead of masking it as a signature
+        # failure. Deliveries can't be verified until setup.py is re-run with
+        # ANTHROPIC_WEBHOOK_SIGNING_KEY set.
+        return JSONResponse({"error": "webhook signing key not configured"}, status_code=503)
     try:
         event = client.beta.webhooks.unwrap(raw.decode(), headers=dict(request.headers))
     except Exception:
-        return JSONResponse({"error": "invalid signature"}, status_code=401)
+        return JSONResponse({"error": "signature verification failed"}, status_code=401)
 
     if event.data.type == "session.status_run_started":
         # event.data.id is the id of the resource that triggered the event, the
         # session. The worker self-claims, so this is only used to name the
         # sandbox; the uuid fallback is defensive and normally unused.
         session_id = getattr(event.data, "id", None) or f"sesn-{uuid4().hex[:12]}"
-        # Spawn fast, return immediately. No claim, no wait.
-        _track(_spawn_worker(session_id))
+        # Spawn synchronously. Holding the inbound webhook connection open for the
+        # spawn keeps THIS orchestrator sandbox active, so it can't standby (and
+        # freeze) mid-spawn. Once started, the worker holds itself alive via process
+        # keep_alive, so the orchestrator can safely standby after we return. If a
+        # cold spawn exceeds Anthropic's webhook delivery timeout, the delivery is
+        # retried and create_if_not_exists is idempotent, so the retry finishes fast.
+        await _spawn_worker(session_id)
 
     return {"status": "ok"}
 

@@ -62,7 +62,7 @@ async def spawn_local_worker(session_id):
         "name": f"cma-worker-{safe_id[:40]}",
         "image": WORKER_IMAGE,
         "memory": 4096,
-        "ttl": "600s",
+        "ttl": "2h",  # max-age cleanup backstop (units m/h/d/w, not seconds)
         "envs": [{"name": "ANTHROPIC_ENVIRONMENT_ID", "value": os.environ["ANTHROPIC_ENVIRONMENT_ID"]},
                  {"name": "ANTHROPIC_ENVIRONMENT_KEY", "value": os.environ["ANTHROPIC_ENVIRONMENT_KEY"]}],
     }
@@ -78,8 +78,12 @@ async def spawn_local_worker(session_id):
             await asyncio.sleep(2)
     await worker.process.exec({
         "name": "ant-poll",
-        "command": f"ant beta:worker poll --workdir /workspace --unrestricted-paths --max-idle {WORKER_MAX_IDLE}",
+        "command": f"ant beta:worker poll --workdir /workspace --max-idle {WORKER_MAX_IDLE}",
         "wait_for_completion": False,
+        # keep_alive holds the sandbox active for the whole session; without it the
+        # worker standbys ~15s after spawn and the poll loop freezes mid-session.
+        "keep_alive": True,
+        "timeout": int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600")),
     })
     print(f"[local-worker] {spec['name']} is polling the queue")
 

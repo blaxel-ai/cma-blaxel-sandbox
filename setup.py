@@ -62,6 +62,8 @@ async def main() -> None:
             break
         except Exception:
             await asyncio.sleep(2)
+    else:
+        raise SystemExit("orchestrator never became ready (could not import app in the sandbox); check the image build and that the env vars were passed")
 
     # Start the webhook server detached. It persists across standby/resume.
     await sbx.process.exec({

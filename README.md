@@ -7,7 +7,7 @@ Run Claude Managed Agents (CMA) tool execution on **Blaxel sandboxes**. Both rol
 
 The narrative walkthrough is in **[GUIDE.md](./GUIDE.md)**.
 
-> Validated end-to-end against a live CMA session: a real agent's `write` and `bash` tool calls executed inside a Blaxel sandbox and posted results back, clean.
+> Validated on Blaxel sandboxes: a real CMA session's `write` and `bash` tool calls executed inside a Blaxel sandbox and posted results back. After changing the worker launch, re-validate with `python example/run_session.py --local-worker`.
 
 ## Layout
 
@@ -66,7 +66,7 @@ export ANTHROPIC_ENVIRONMENT_KEY=sk-ant-oat01-...
 export ANTHROPIC_AGENT_ID=$(curl -sS https://api.anthropic.com/v1/agents \
   -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
   -H "anthropic-beta: managed-agents-2026-04-01" -H "content-type: application/json" \
-  -d '{"name":"Coding Assistant","model":"claude-opus-4-8","system":"You are a coding agent. Your working directory is /workspace; use absolute /workspace paths.","tools":[{"type":"agent_toolset_20260401"}]}' \
+  -d '{"name":"Coding Assistant","model":"claude-opus-4-8","system":"You are a coding agent. Your working directory is /workspace; use absolute /workspace paths. Every tool call must produce non-empty output: if a shell command would print nothing (for example output redirected to a file), append a status echo such as && echo ok, because an empty tool result is rejected by the API.","tools":[{"type":"agent_toolset_20260401"}]}' \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 echo "agent: $ANTHROPIC_AGENT_ID"
 ```
@@ -102,7 +102,7 @@ python example/run_session.py
 
 - **The worker image is the agent's runtime.** Whatever the agent executes (python, node, compilers, CLIs) must be installed in the worker image. The default ships `node` (from the base) and `python3`; extend the worker Dockerfile with the languages and tools your agents need.
 - **`bash` needs `/bin/bash`:** the Debian base includes it (Alpine would not); skill download also needs `unzip` and `tar`.
-- **Working directory:** run the worker with `--unrestricted-paths` and have the agent use absolute `/workspace` paths, so the `write` tool's base and `bash`'s cwd agree.
+- **Working directory & keep-alive (the big one):** the worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so tool file access stays contained to `/workspace`. Launch the poller with `keep_alive: True` plus a `timeout` cap: Blaxel sandboxes standby ~15s after the last inbound connection, and the poller only makes outbound calls, so without keep-alive the worker freezes mid-session. Tell the agent to use absolute `/workspace` paths so the `write` tool and `bash`'s cwd agree.
 - **Sandbox names:** must be lowercase alphanumerics and hyphens, so session ids (`sesn_01Ab…`) are sanitized before use as a worker name.
 - **Orchestrator credential:** pass a service-account `BL_API_KEY`; sandboxes do not get an auto-injected Blaxel identity.
 - **`--max-idle`** (default `60s`, override with `ANT_MAX_IDLE`): keep it generous enough to span the agent's reasoning between tool calls.
