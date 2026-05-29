@@ -4,7 +4,7 @@ preview URL, and the running server survives standby and resumes LIVE — the
 same process, not a cold reboot. No other CMA sandbox provider can show this.
 
 Flow:
-  1. Create a session; the agent uses its write tool to author app.py in /workspace.
+  1. Create a session; the agent uses its bash tool to author app.py in /workspace.
   2. The harness starts that app as a long-lived sandbox process on :3000 (CMA
      tool calls are request-scoped, so a server must be supervised, not
      backgrounded inside one tool call) and exposes it on a public preview URL.
@@ -35,9 +35,10 @@ APP_CODE = (
 )
 
 MESSAGE = (
-    "Use your write tool to create a file named app.py in your working directory "
-    "(use the RELATIVE path app.py, not an absolute path) with EXACTLY this content, "
-    f"then reply with the single word DONE. Do not run it.\n```\n{APP_CODE}```"
+    "Use your bash tool to create /workspace/app.py with EXACTLY the content below, "
+    "then run `test -f /workspace/app.py && echo DONE`. Do not run the app server. "
+    "The shell command must print DONE.\n```python\n"
+    f"{APP_CODE}```"
 )
 
 
@@ -112,28 +113,34 @@ async def main():
         await asyncio.sleep(5)
     # Confirm the file actually landed at /workspace/app.py; if the contained write
     # tool put it elsewhere, the harness writes it (the demo still shows the wow).
-    chk = await worker.process.exec({"name": "chk", "command": "test -f /workspace/app.py && echo FILEOK || echo MISSING",
-                                     "wait_for_completion": True})
-    authored = "FILEOK" in getattr(chk, "logs", "")
+    authored = False
+    for _ in range(12):
+        chk = await worker.process.exec({"name": f"chk-{uuid4().hex[:8]}", "command": "test -f /workspace/app.py && echo FILEOK || echo MISSING",
+                                         "wait_for_completion": True})
+        authored = "FILEOK" in getattr(chk, "logs", "")
+        if authored:
+            break
+        await asyncio.sleep(1)
     if not authored:
-        await worker.process.exec({"name": "writefile",
+        await worker.process.exec({"name": f"writefile-{uuid4().hex[:8]}",
                                    "command": "cat > /workspace/app.py <<'PYEOF'\n" + APP_CODE + "PYEOF\necho WROTE",
                                    "wait_for_completion": True})
     print("  app.py:", "agent-authored" if authored else "harness fallback (agent write landed elsewhere)")
 
     print("\n[2/3] harness starts the agent's app as a supervised server on :3000, expose preview ...")
     try:
-        await worker.process.exec({"name": "appsrv", "command": "python3 /workspace/app.py",
+        app_process_name = f"appsrv-{uuid4().hex[:8]}"
+        await worker.process.exec({"name": app_process_name, "command": "python3 /workspace/app.py",
                                    "wait_for_completion": False, "wait_for_ports": [PORT]})
     except Exception:
-        await worker.process.exec({"name": "appsrv", "command": "python3 /workspace/app.py",
+        await worker.process.exec({"name": app_process_name, "command": "python3 /workspace/app.py",
                                    "wait_for_completion": False})
         await asyncio.sleep(3)
-    inside = await worker.process.exec({"name": "insidecurl",
+    inside = await worker.process.exec({"name": f"insidecurl-{uuid4().hex[:8]}",
                                         "command": f"curl -s -m 5 http://localhost:{PORT}/ && echo ' INSIDE_OK'",
                                         "wait_for_completion": True})
     print("  inside-sandbox check:", (getattr(inside, "logs", "") or "").strip()[:120])
-    preview = await worker.previews.create({"metadata": {"name": "app"}, "spec": {"port": PORT, "public": True}})
+    preview = await worker.previews.create_if_not_exists({"metadata": {"name": "app"}, "spec": {"port": PORT, "public": True}})
     url = getattr(preview.spec, "url", None) or ""
     if url.startswith("//"):
         url = "https:" + url
@@ -152,7 +159,7 @@ async def main():
 
     print("\n[3/3] resume-from-standby: release keep-alive, idle to force standby, hit again ...")
     try:
-        await worker.process.kill("ant-poll")
+        await worker.process.kill(process_name)
     except Exception as e:
         print("  (kill poll:", repr(e), ")")
     idle_s = int(os.environ.get("DEMO_STANDBY_IDLE", "30"))
@@ -165,7 +172,8 @@ async def main():
     print("\n" + "=" * 64)
     ok = (st == 200 and st2 == 200 and pid_warm == pid_cold and pid_warm != "?")
     print(f"DEMO: {'PASS' if ok else 'PARTIAL/FAIL'}")
-    print(f"  agent-authored app reachable on preview URL : {st == 200}")
+    print(f"  agent-authored app.py                    : {authored}")
+    print(f"  app reachable on preview URL             : {st == 200}")
     print(f"  same server pid across standby/resume       : {pid_warm} == {pid_cold}")
     print(f"  resume round-trip after standby             : {ms2:.0f} ms (Blaxel internal resume ~25ms; rest is network)")
     print(f"\n  Click it: {app_url}")
