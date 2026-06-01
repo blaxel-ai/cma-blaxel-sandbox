@@ -29,7 +29,8 @@ RUN set -eux; \
     chmod +x /usr/local/bin/ant
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY smoke.sh /worker/smoke.sh
+RUN chmod +x /entrypoint.sh /worker/smoke.sh
 
 RUN mkdir -p /workspace /mnt/session/outputs
 

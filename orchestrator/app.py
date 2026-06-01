@@ -57,6 +57,17 @@ worker_keepalive_timeout = int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))
 worker_region = os.environ.get("BL_REGION")
 
 
+def _worker_name(session_id: str) -> str:
+    """Derive a valid Blaxel sandbox name from an Anthropic session id.
+
+    Blaxel names allow only lowercase alphanumerics and hyphens. Session ids look
+    like `sesn_01Ab...`; the underscore (and any other unexpected char) maps to a
+    hyphen, and the id is bounded so the worker name stays short.
+    """
+    safe_id = re.sub(r"[^a-z0-9-]", "-", session_id.lower())
+    return f"cma-worker-{safe_id[:40]}"
+
+
 def _duration_to_seconds(value: str, default: int) -> int:
     match = re.fullmatch(r"\s*(\d+)\s*([smhdw]?)\s*", value.lower())
     if not match:
@@ -137,8 +148,7 @@ async def _spawn_worker(session_id: str) -> bool:
     auto-deletes the sandbox as a cleanup backstop, so there is no
     orchestrator-side delete to babysit; keep it well above a session's length.
     """
-    safe_id = session_id.replace("_", "-").lower()
-    name = f"cma-worker-{safe_id[:40]}"
+    name = _worker_name(session_id)
     envs = [
         {"name": "ANTHROPIC_ENVIRONMENT_ID", "value": environment_id},
         {"name": "ANTHROPIC_ENVIRONMENT_KEY", "value": environment_key},

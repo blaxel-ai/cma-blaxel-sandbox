@@ -29,7 +29,7 @@ GUIDE.md        the integration guide (prose)
 
 ## Quickstart
 
-Set your credentials once:
+Set your credentials once (or `cp .env.example .env`, fill it in, and `set -a; source .env; set +a`):
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...           # control-plane calls below
@@ -109,6 +109,24 @@ python example/run_session.py
 - **Orchestrator credential:** pass a service-account `BL_API_KEY`; sandboxes do not get an auto-injected Blaxel identity.
 - **Duplicate webhooks / later turns:** Anthropic can retry `session.status_run_started`, and the same session can get later turns. The orchestrator serializes starts per session, skips duplicate starts for the `ANT_MAX_IDLE` window (override with `ANT_RESTART_COOLDOWN`), and uses a unique poller process name for each real restart so completed process records do not block later turns.
 - **`--max-idle`** (default `60s`, override with `ANT_MAX_IDLE`): keep it generous enough to span the agent's reasoning between tool calls.
+
+## Tests
+
+Unit tests lock the orchestrator's webhook handling with no network and no real sandboxes: duplicate-webhook suppression, the per-session restart cooldown, worker-name sanitization, and the `/webhook` status codes (503 unconfigured, 401 bad signature, 200 spawn, 503 spawn failure).
+
+```bash
+python -m pip install -r requirements-dev.txt
+pytest
+```
+
+Worker-image smoke (the image is the agent's runtime, so check the tools are present):
+
+```bash
+docker build -t cma-worker:smoke worker
+docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke
+```
+
+End-to-end validation against real Anthropic + Blaxel is the `example/` scripts (step 4 above).
 
 ## Links
 
