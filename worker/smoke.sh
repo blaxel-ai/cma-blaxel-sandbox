@@ -1,7 +1,7 @@
 #!/bin/sh
 # Smoke test for the CMA worker image: proves the runtime the agent's tool calls
 # depend on is present and that the poll command exists. The worker image IS the
-# agent's execution environment, so this is the contract a managed endpoint relies
+# agent's execution environment, so this is the contract the orchestrator relies
 # on before spawning it.
 #
 #   docker build -t cma-worker:smoke worker
