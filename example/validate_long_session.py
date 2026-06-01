@@ -21,7 +21,7 @@ ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REG
     python3 example/validate_long_session.py                     # local-worker (no webhook)
     python3 example/validate_long_session.py --no-local-worker   # rely on webhook + orchestrator
 """
-import argparse, asyncio, json, os, time, urllib.request, urllib.error
+import argparse, asyncio, json, os, re, time, urllib.request, urllib.error
 from uuid import uuid4
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -75,7 +75,7 @@ def queue_pending():
 
 async def spawn_local_worker(session_id):
     from blaxel.core import SandboxInstance
-    safe_id = session_id.replace("_", "-").lower()
+    safe_id = re.sub(r"[^a-z0-9-]", "-", session_id.lower())
     spec = {
         "name": f"cma-worker-{safe_id[:40]}",
         "image": WORKER_IMAGE,
@@ -89,7 +89,7 @@ async def spawn_local_worker(session_id):
     worker = await SandboxInstance.create_if_not_exists(spec)
     for i in range(20):
         try:
-            await worker.process.exec({"name": f"probe{i}", "command": "node -v", "wait_for_completion": True})
+            await worker.process.exec({"name": f"probe-{uuid4().hex[:8]}", "command": "node -v", "wait_for_completion": True})
             break
         except Exception:
             await asyncio.sleep(2)
@@ -119,6 +119,10 @@ async def main():
     for req in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_AGENT_ID"):
         if not os.environ.get(req):
             raise SystemExit(f"missing required env: {req}")
+    if args.local_worker:
+        for req in ("ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"):
+            if not os.environ.get(req):
+                raise SystemExit(f"missing required env: {req}")
 
     _, sess = api("POST", "/v1/sessions",
                   {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})

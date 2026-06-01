@@ -15,8 +15,10 @@ The narrative walkthrough is in **[GUIDE.md](./GUIDE.md)**.
 
 ```
 orchestrator/   app.py (webhook -> spawn worker), Dockerfile, requirements.txt, blaxel.toml
-worker/         Dockerfile (sandbox-api + ant + node/python3), entrypoint.sh, blaxel.toml
+worker/         Dockerfile (sandbox-api + ant + node/python3), entrypoint.sh, smoke.sh, blaxel.toml
 example/        run_session.py: create a session + watch it run
+                demo_preview_resume.py: agent authors an app; proves standby/resume preserves the live process
+                validate_long_session.py: long keep-alive run + filesystem containment probe
 setup.py        bring up the orchestrator sandbox and print its public webhook URL
 GUIDE.md        the integration guide (prose)
 ```
@@ -26,6 +28,7 @@ GUIDE.md        the integration guide (prose)
 - A Blaxel workspace, the **`bl` CLI** (for `bl push`), and a **service-account `BL_API_KEY`**. The orchestrator uses it to spawn workers, because a sandbox does not inherit a workspace identity the way a Blaxel Agent does. Create one under Service Accounts.
 - Access to Claude Managed Agents (`managed-agents-2026-04-01` beta) and an `ANTHROPIC_API_KEY`.
 - `python3`, and `pip install "blaxel>=0.2.54"` locally (used by `setup.py` and the `--local-worker` test). The `ant` CLI is baked into the worker image, so there is nothing to install.
+- **Docker** (for `bl push` and the worker smoke test).
 
 ## Quickstart
 
@@ -38,6 +41,16 @@ export BL_API_KEY=<service-account-key>
 # export BL_REGION=us-pdx-1                    # optional; silences the SDK region warning
 ```
 
+**Preflight: verify your API key has CMA beta access** (a 200 response with an array means the key is valid and in the right org):
+
+```bash
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
+  https://api.anthropic.com/v1/environments \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: managed-agents-2026-04-01"
+```
+
 **1. Create the self-hosted environment** (captures the id into your shell):
 
 ```bash
@@ -45,11 +58,11 @@ export ANTHROPIC_ENVIRONMENT_ID=$(curl -sS https://api.anthropic.com/v1/environm
   -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
   -H "anthropic-beta: managed-agents-2026-04-01" -H "content-type: application/json" \
   -d '{"name":"blaxel-selfhosted","config":{"type":"self_hosted"}}' \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id') or sys.exit(json.dumps(d)))")
 echo "environment: $ANTHROPIC_ENVIRONMENT_ID"
 ```
 
-Then open that environment in the Anthropic Console, click **Generate environment key**, and export the `sk-ant-oat01-…` key the worker authenticates with:
+Then in the Anthropic Console (console.anthropic.com), go to **Manage > Environments**, open the environment by name, and click **Generate environment key**. Export the `sk-ant-oat01-…` key the worker authenticates with:
 
 ```bash
 export ANTHROPIC_ENVIRONMENT_KEY=sk-ant-oat01-...
@@ -68,8 +81,8 @@ export ANTHROPIC_ENVIRONMENT_KEY=sk-ant-oat01-...
 export ANTHROPIC_AGENT_ID=$(curl -sS https://api.anthropic.com/v1/agents \
   -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
   -H "anthropic-beta: managed-agents-2026-04-01" -H "content-type: application/json" \
-  -d '{"name":"Coding Assistant","model":"claude-opus-4-8","system":"You are a coding agent. Your working directory is /workspace. Use relative paths only for file tools; never pass /workspace/... to file tools. Use /workspace/... paths in shell commands. Every tool call must produce non-empty output: if a shell command would print nothing (for example output redirected to a file), append a status echo such as && echo ok, because an empty tool result is rejected by the API.","tools":[{"type":"agent_toolset_20260401"}]}' \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+  -d '{"name":"Coding Assistant","model":"claude-opus-4-8","system":"You are a coding agent. Your working directory is /workspace. The file tools (write/read/edit/glob/grep) are sandboxed to /workspace; absolute paths like /workspace/hello.txt are REJECTED with \"absolute path not permitted\". Always pass bare relative paths to file tools (\"hello.txt\", not \"/workspace/hello.txt\"). Shell (bash) commands are unrestricted and use /workspace/... paths. Every tool call must produce non-empty output: if a shell command would print nothing (for example output redirected to a file), append a status echo such as && echo ok, because an empty tool result is rejected by the API.","tools":[{"type":"agent_toolset_20260401"}]}' \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id') or sys.exit(json.dumps(d)))")
 echo "agent: $ANTHROPIC_AGENT_ID"
 ```
 
@@ -104,11 +117,13 @@ python example/run_session.py
 
 - **The worker image is the agent's runtime.** Whatever the agent executes (python, node, compilers, CLIs) must be installed in the worker image. The default ships `node` (from the base) and `python3`; extend the worker Dockerfile with the languages and tools your agents need.
 - **`bash` needs `/bin/bash`:** the Debian base includes it (Alpine would not); skill download also needs `unzip` and `tar`.
-- **Working directory & keep-alive (the big one):** the worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so file tools stay contained to `/workspace`. Tell the agent to use relative paths only for file tools and `/workspace/...` paths in shell commands. Launch the poller with `keep_alive: True` plus a `timeout` cap: Blaxel sandboxes standby ~15s after the last inbound connection, and the poller only makes outbound calls, so without keep-alive the worker freezes mid-session.
+- **Working directory & keep-alive (the big one):** the worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so file tools stay contained to `/workspace`. Absolute paths like `/workspace/hello.txt` passed to file tools are REJECTED with "absolute path not permitted"; always use bare relative paths (`hello.txt`, not `/workspace/hello.txt`). Shell (bash) commands are unrestricted and use `/workspace/...` paths. Launch the poller with `keep_alive: True` plus a `timeout` cap: Blaxel sandboxes standby ~15s after the last inbound connection, and the poller only makes outbound calls, so without keep-alive the worker freezes mid-session.
 - **Sandbox names:** must be lowercase alphanumerics and hyphens, so session ids (`sesn_01Ab…`) are sanitized before use as a worker name.
 - **Orchestrator credential:** pass a service-account `BL_API_KEY`; sandboxes do not get an auto-injected Blaxel identity.
 - **Duplicate webhooks / later turns:** Anthropic can retry `session.status_run_started`, and the same session can get later turns. The orchestrator serializes starts per session, skips duplicate starts for the `ANT_MAX_IDLE` window (override with `ANT_RESTART_COOLDOWN`), and uses a unique poller process name for each real restart so completed process records do not block later turns.
 - **`--max-idle`** (default `60s`, override with `ANT_MAX_IDLE`): keep it generous enough to span the agent's reasoning between tool calls.
+- **401 invalid x-api-key:** your `ANTHROPIC_API_KEY` is invalid or lacks Claude Managed Agents beta access. Run the preflight check above.
+- **Resources created but not visible in the Anthropic Console:** the key belongs to a different org/workspace than the one you are viewing. Confirm the key's org matches the Console you have open.
 
 ## Tests
 
@@ -127,6 +142,16 @@ docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke
 ```
 
 End-to-end validation against real Anthropic + Blaxel is the `example/` scripts (step 4 above).
+
+## Teardown
+
+Workers self-delete via their TTL once idle. The orchestrator sandbox and its public preview URL persist until you remove them. Delete it when done so the public webhook endpoint does not stay live:
+
+```bash
+bl delete sandbox cma-orchestrator-app
+```
+
+Or via the Blaxel Console, or with the SDK: `await SandboxInstance.delete("cma-orchestrator-app")`.
 
 ## Links
 

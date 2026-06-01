@@ -1,5 +1,7 @@
-# Test/dev dependencies. Not needed at runtime inside the sandboxes -- those use
-# orchestrator/requirements.txt (and the worker ships `ant` baked into its image).
+# Test/dev dependencies. The tests import the orchestrator (orchestrator/app.py),
+# so its runtime deps are required too -- pulled in via the -r line below.
 #   python -m pip install -r requirements-dev.txt && pytest
+-r orchestrator/requirements.txt
+httpx>=0.27          # FastAPI TestClient transport
 pytest>=8
 pytest-asyncio>=0.24

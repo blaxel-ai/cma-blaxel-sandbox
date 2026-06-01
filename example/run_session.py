@@ -16,7 +16,7 @@ For --local-worker, also:
     BL_API_KEY, BL_WORKSPACE   so the Blaxel SDK can spawn the worker sandbox
     BL_REGION                  optional, e.g. us-pdx-1
 """
-import argparse, asyncio, json, os, urllib.request, urllib.error
+import argparse, asyncio, json, os, re, urllib.request, urllib.error
 from uuid import uuid4
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -55,10 +55,10 @@ def queue_pending():
 
 async def spawn_local_worker(session_id):
     from blaxel.core import SandboxInstance
-    # Blaxel sandbox names allow only lowercase alphanumerics + hyphens, but
-    # session ids look like `sesn_01AbC...` (underscore + mixed case), so
-    # sanitize before using it as a name (matches orchestrator/app.py).
-    safe_id = session_id.replace("_", "-").lower()
+    # Blaxel sandbox names allow only lowercase alphanumerics + hyphens.
+    # Session ids look like `sesn_01AbC...`; sanitize with the same regex as
+    # _worker_name() in orchestrator/app.py.
+    safe_id = re.sub(r"[^a-z0-9-]", "-", session_id.lower())
     spec = {
         "name": f"cma-worker-{safe_id[:40]}",
         "image": WORKER_IMAGE,
@@ -73,7 +73,7 @@ async def spawn_local_worker(session_id):
     # Wait for the in-sandbox API to accept commands (a fresh sandbox is cold).
     for i in range(45):
         try:
-            await worker.process.exec({"name": f"probe{i}", "command": "node -v", "wait_for_completion": True})
+            await worker.process.exec({"name": f"probe-{uuid4().hex[:8]}", "command": "node -v", "wait_for_completion": True})
             break
         except Exception:
             await asyncio.sleep(2)
@@ -99,6 +99,14 @@ async def main():
     ap.add_argument("--local-worker", action="store_true",
                     help="spawn the worker directly instead of relying on the webhook + orchestrator")
     args = ap.parse_args()
+
+    for _req in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_AGENT_ID"):
+        if not os.environ.get(_req):
+            raise SystemExit(f"missing required env: {_req}")
+    if args.local_worker:
+        for _req in ("ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"):
+            if not os.environ.get(_req):
+                raise SystemExit(f"missing required env: {_req}")
 
     _, sess = api("POST", "/v1/sessions",
                   {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})
