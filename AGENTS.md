@@ -45,7 +45,7 @@ Full prose guide: `GUIDE.md`. Quickstart: `README.md`. Machine summary: `llms.tx
 | Command | What it does | Side effects |
 | -- | -- | -- |
 | `pytest` | orchestrator unit tests | **local, safe** |
-| `sh worker/smoke.sh` (inside the built image) | worker runtime smoke test | **local, safe** |
+| `docker build -t cma-worker:smoke worker && docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke` | worker runtime smoke test | **local, safe** |
 | `python example/run_session.py --local-worker` | create session, spawn worker directly, watch it run | creates a real Anthropic session + Blaxel sandbox (cost) |
 | `python example/run_session.py` | full webhook flow | real session; needs the orchestrator live |
 | `python example/demo_preview_resume.py` | preview + standby/resume demo (same pid survives standby) | real resources |
@@ -70,7 +70,7 @@ Full prose guide: `GUIDE.md`. Quickstart: `README.md`. Machine summary: `llms.tx
 
 ## Invariants to respect (breaking these stalls sessions)
 
-- **File tools use relative paths only**; use `/workspace/...` only in shell commands. The worker runs without `--unrestricted-paths`, so file tools are contained to `/workspace`.
+- **File tools use relative paths only.** Passing an absolute path like `/workspace/hello.txt` to a file tool is REJECTED with "absolute path not permitted". Use bare relative paths (`hello.txt`, not `/workspace/hello.txt`). Shell (bash) commands are unrestricted and use `/workspace/...` paths.
 - **Every tool call must produce non-empty output** — an empty tool result is rejected by the API (400). For a silent command, append `&& echo ok`.
 - **Sandbox names** are lowercase alphanumerics + hyphens only; sanitize session ids before naming a worker (see `_worker_name` in `orchestrator/app.py`).
 - **Launch the poller with `keep_alive: True` + a `timeout` cap**, or the sandbox standbys ~15s after spawn (the poller only makes outbound calls) and the poll loop freezes mid-session.
@@ -79,6 +79,6 @@ Full prose guide: `GUIDE.md`. Quickstart: `README.md`. Machine summary: `llms.tx
 
 ## Safe vs. company-facing
 
-- **Local + safe:** `pytest`, `worker/smoke.sh`, `python -m py_compile`, reading code.
+- **Local + safe:** `pytest`, `docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke`, `python -m py_compile`, reading code.
 - **Creates real cloud resources / costs money:** the `example/*.py` scripts, `setup.py`, `bl push`.
 - **Do not publish** (push to GitHub, change repo visibility, register a public webhook, open a PR) without explicit human approval. This cookbook stays private until the external package is approved.

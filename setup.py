@@ -20,6 +20,7 @@ scale-to-zero/standby (verified), so an inbound webhook resumes it.
 """
 import asyncio
 import os
+from uuid import uuid4
 
 from blaxel.core import SandboxInstance
 
@@ -36,12 +37,16 @@ PASSTHROUGH = [
     "BL_WORKSPACE",
     "BL_REGION",
     "BLAXEL_WORKER_IMAGE",
+    "BLAXEL_WORKER_TTL",
+    "ANT_MAX_IDLE",
+    "ANT_RESTART_COOLDOWN",
+    "ANT_KEEPALIVE_TIMEOUT",
 ]
 
 
 async def main() -> None:
     envs = [{"name": k, "value": os.environ[k]} for k in PASSTHROUGH if os.environ.get(k)]
-    for required in ("ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY"):
+    for required in ("ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"):
         if not os.environ.get(required):
             raise SystemExit(f"missing required env: {required}")
 
@@ -58,7 +63,7 @@ async def main() -> None:
 
     for attempt in range(45):
         try:
-            await sbx.process.exec({"name": f"probe{attempt}", "command": "python3 -c \"import app\"", "working_dir": "/app", "wait_for_completion": True})
+            await sbx.process.exec({"name": f"probe-{uuid4().hex[:8]}", "command": "python3 -c \"import app\"", "working_dir": "/app", "wait_for_completion": True})
             break
         except Exception:
             await asyncio.sleep(2)

@@ -16,7 +16,7 @@ Env (same as run_session.py): ANTHROPIC_API_KEY, ANTHROPIC_ENVIRONMENT_ID,
 ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REGION].
 Run: python example/demo_preview_resume.py
 """
-import asyncio, json, os, time, urllib.request, urllib.error
+import asyncio, json, os, re, time, urllib.request, urllib.error
 from uuid import uuid4
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -85,7 +85,7 @@ async def main():
     api("POST", f"/v1/sessions/{sid}/events",
         {"events": [{"type": "user.message", "content": [{"type": "text", "text": MESSAGE}]}]})
 
-    safe = sid.replace("_", "-").lower()
+    safe = re.sub(r"[^a-z0-9-]", "-", sid.lower())
     spec = {"name": f"cma-worker-{safe[:40]}", "image": WORKER_IMAGE, "memory": 4096, "ttl": "2h",
             "envs": [{"name": "ANTHROPIC_ENVIRONMENT_ID", "value": os.environ["ANTHROPIC_ENVIRONMENT_ID"]},
                      {"name": "ANTHROPIC_ENVIRONMENT_KEY", "value": os.environ["ANTHROPIC_ENVIRONMENT_KEY"]}]}
@@ -133,6 +133,7 @@ async def main():
         await worker.process.exec({"name": app_process_name, "command": "python3 /workspace/app.py",
                                    "wait_for_completion": False, "wait_for_ports": [PORT]})
     except Exception:
+        app_process_name = f"appsrv-{uuid4().hex[:8]}"
         await worker.process.exec({"name": app_process_name, "command": "python3 /workspace/app.py",
                                    "wait_for_completion": False})
         await asyncio.sleep(3)
