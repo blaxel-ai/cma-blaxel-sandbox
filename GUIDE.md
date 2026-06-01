@@ -22,6 +22,30 @@ Worker sandbox  -- `ant beta:worker poll`
    • exits when idle; a TTL auto-deletes the sandbox
 ```
 
+The full lifecycle of one session:
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant A as Anthropic (brain)
+    participant O as Orchestrator sandbox
+    participant W as Worker sandbox
+
+    User->>A: create session + send message
+    A->>A: enqueue work on the environment work queue
+    A->>O: POST /webhook — session.status_run_started
+    O->>O: verify webhook signature (whsec_…)
+    O->>W: create_if_not_exists worker (one per session id)
+    O->>W: start poller (keep_alive, unique process name)
+    O-->>A: 200 ok (no polling, no babysitting)
+    W->>A: poll work queue (environment key)
+    A-->>W: hand over the session's work
+    W->>W: run tool calls in /workspace (bash/read/write/edit/glob/grep)
+    W->>A: post tool results
+    Note over W: idle past --max-idle, poller exits. TTL deletes the sandbox
+    Note over O: standbys after replying. Next webhook resumes it<br/>with process + memory intact (no cold reboot)
+```
+
 - **Orchestrator:** a Blaxel sandbox running a small webhook server, exposed on a public **preview URL** that you register as the Anthropic webhook. An inbound webhook resumes the sandbox from standby (process and memory survive resume), so it costs nothing while idle and has no execution-time limit. It does one thing per event: spawn a worker and return.
 - **Worker:** a Blaxel sandbox that runs Anthropic's `ant` worker in `poll` mode. It claims the queued session itself, executes the tool calls, posts results, and shuts down. It is launched with **process keep-alive** so the sandbox stays active for the whole session instead of standbying after ~15s of no inbound connection (the poller only makes outbound calls). A TTL cleans it up once the poller exits, so nothing has to supervise it.
 

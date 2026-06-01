@@ -1,0 +1,47 @@
+# Claude Managed Agents on Blaxel (self-hosted sandbox cookbook)
+
+> Run Claude Managed Agents (CMA) tool execution on Blaxel sandboxes. Anthropic runs the agent loop (the "brain"); Blaxel runs tool execution (the "hands"). Both roles are Blaxel sandboxes: an orchestrator sandbox (a FastAPI webhook on a public preview URL) and a worker sandbox (`ant beta:worker poll`). This is the self-hosted / advanced reference path. If you are an AI agent working in this repo, read AGENTS.md first.
+
+## The three credentials (keep them straight)
+
+- `ANTHROPIC_API_KEY` (`sk-ant-api03-…`): standard key, control-plane only (create environment / agent / session). Never on the worker.
+- `ANTHROPIC_ENVIRONMENT_KEY` (`sk-ant-oat01-…`): per-environment, scoped + revocable. The worker's work-queue auth, and the only Anthropic secret that enters the worker.
+- `ANTHROPIC_WEBHOOK_SIGNING_KEY` (`whsec_…`): verifies inbound webhook signatures on the orchestrator.
+
+## Canonical flow
+
+- Create a self-hosted environment → `ANTHROPIC_ENVIRONMENT_ID`; generate the environment key.
+- Build/push the worker image → `sandbox/cma-worker:latest`.
+- Create an agent with `agent_toolset_20260401` → `ANTHROPIC_AGENT_ID`.
+- A session enqueues work; on `session.status_run_started` Anthropic calls the orchestrator webhook.
+- The orchestrator verifies the signature, spawns or reuses one worker per session, and returns 200.
+- The worker self-claims from the environment work queue, runs tools in `/workspace`, posts results, and exits on idle; a TTL cleans up the sandbox.
+
+## Key files
+
+- [GUIDE.md](GUIDE.md): full narrative guide — architecture, the 7 setup steps, validated gotchas.
+- [README.md](README.md): quickstart.
+- [AGENTS.md](AGENTS.md): agent onboarding — read first if you are an AI agent.
+- [orchestrator/app.py](orchestrator/app.py): webhook verify + per-session spawn/duplicate-suppression + poller launch.
+- [worker/Dockerfile](worker/Dockerfile): the agent's runtime (`ant` 1.10.0, node 22, python3, bash, git/curl/tar/unzip).
+- [setup.py](setup.py): bring up the orchestrator sandbox and print the webhook URL.
+- [example/run_session.py](example/run_session.py): end-to-end example (`--local-worker` skips the webhook).
+- [tests/](tests): pytest suite for the orchestrator.
+
+## Commands
+
+- `pytest`: orchestrator unit tests (local, safe).
+- `python example/run_session.py --local-worker`: validate the worker without a webhook (creates a real Anthropic session + Blaxel sandbox).
+- `python setup.py`: deploy the orchestrator and print the webhook URL.
+
+## Invariants
+
+- File tools use relative paths only; `/workspace/...` only in shell commands (the worker runs without `--unrestricted-paths`).
+- Every tool call must emit non-empty output (an empty result is rejected with API 400).
+- Launch the poller with `keep_alive: True` + a `timeout` cap, or the sandbox standbys mid-session.
+- `ttl` is max-age from creation (`m/h/d/w`), not idle, not seconds.
+
+## Links
+
+- Anthropic self-hosted sandboxes: https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes
+- Blaxel docs: https://docs.blaxel.ai

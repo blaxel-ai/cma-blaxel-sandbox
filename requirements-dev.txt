@@ -1,0 +1,5 @@
+# Test/dev dependencies. Not needed at runtime inside the sandboxes -- those use
+# orchestrator/requirements.txt (and the worker ships `ant` baked into its image).
+#   python -m pip install -r requirements-dev.txt && pytest
+pytest>=8
+pytest-asyncio>=0.24
