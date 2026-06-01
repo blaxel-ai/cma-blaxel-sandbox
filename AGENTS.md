@@ -23,10 +23,10 @@ Full prose guide: `GUIDE.md`. Quickstart: `README.md`. Machine summary: `llms.tx
 1. **Create the self-hosted environment** (`curl .../v1/environments`, `config.type=self_hosted`) → `ANTHROPIC_ENVIRONMENT_ID`. Then in the Console, **Generate environment key** → `ANTHROPIC_ENVIRONMENT_KEY`. *(Console step — not scriptable.)*
 2. **Build + push the worker image**: `(cd worker && bl push --type sandbox)` → `sandbox/cma-worker:latest`.
 3. **Create an agent** (`curl .../v1/agents`, tools `agent_toolset_20260401`) → `ANTHROPIC_AGENT_ID`.
-4. **Validate the worker without a webhook**: `python example/run_session.py --local-worker`.
-5. **Bring up the orchestrator**: `(cd orchestrator && bl push --type sandbox)` then `python setup.py` → prints the public webhook URL.
-6. **Register the webhook** in the Console (Manage > Webhooks) for `session.status_run_started`, copy the `whsec_` secret → `ANTHROPIC_WEBHOOK_SIGNING_KEY`, re-run `python setup.py`. *(Console step — not scriptable.)*
-7. **Run a full session**: `python example/run_session.py`.
+4. **Validate the worker without a webhook**: `python3 example/run_session.py --local-worker`.
+5. **Bring up the orchestrator**: `(cd orchestrator && bl push --type sandbox)` then `python3 setup.py` → prints the public webhook URL.
+6. **Register the webhook** in the Console (Manage > Webhooks) for `session.status_run_started`, copy the `whsec_` secret → `ANTHROPIC_WEBHOOK_SIGNING_KEY`, re-run `python3 setup.py`. *(Console step — not scriptable.)*
+7. **Run a full session**: `python3 example/run_session.py`.
 
 ## Environment variables
 
@@ -44,13 +44,13 @@ Full prose guide: `GUIDE.md`. Quickstart: `README.md`. Machine summary: `llms.tx
 
 | Command | What it does | Side effects |
 | -- | -- | -- |
-| `pytest` | orchestrator unit tests | **local, safe** |
+| `python3 -m pytest` | orchestrator unit tests | **local, safe** |
 | `docker build -t cma-worker:smoke worker && docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke` | worker runtime smoke test | **local, safe** |
-| `python example/run_session.py --local-worker` | create session, spawn worker directly, watch it run | creates a real Anthropic session + Blaxel sandbox (cost) |
-| `python example/run_session.py` | full webhook flow | real session; needs the orchestrator live |
-| `python example/demo_preview_resume.py` | preview + standby/resume demo (same pid survives standby) | real resources |
-| `python example/validate_long_session.py` | long keep-alive run + filesystem-containment probe | real resources |
-| `python setup.py` | create the orchestrator sandbox, start uvicorn, expose a public preview URL | creates a persistent sandbox + public URL |
+| `python3 example/run_session.py --local-worker` | create session, spawn worker directly, watch it run | creates a real Anthropic session + Blaxel sandbox (cost) |
+| `python3 example/run_session.py` | full webhook flow | real session; needs the orchestrator live |
+| `python3 example/demo_preview_resume.py` | preview + standby/resume demo (same pid survives standby) | real resources |
+| `python3 example/validate_long_session.py` | long keep-alive run + filesystem-containment probe | real resources |
+| `python3 setup.py` | create the orchestrator sandbox, start uvicorn, expose a public preview URL | creates a persistent sandbox + public URL |
 | `bl push --type sandbox` (in `worker/` or `orchestrator/`) | build + publish the sandbox image | publishes to your workspace |
 
 ## Where to look
@@ -79,6 +79,6 @@ Full prose guide: `GUIDE.md`. Quickstart: `README.md`. Machine summary: `llms.tx
 
 ## Safe vs. company-facing
 
-- **Local + safe:** `pytest`, `docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke`, `python -m py_compile`, reading code.
+- **Local + safe:** `python3 -m pytest`, `docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke`, `python3 -m py_compile`, reading code.
 - **Creates real cloud resources / costs money:** the `example/*.py` scripts, `setup.py`, `bl push`.
 - **Do not publish** (push to GitHub, change repo visibility, register a public webhook, open a PR) without explicit human approval. This cookbook stays private until the external package is approved.

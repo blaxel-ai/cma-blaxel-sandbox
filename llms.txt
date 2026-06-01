@@ -1,6 +1,6 @@
 # Claude Managed Agents on Blaxel (self-hosted sandbox cookbook)
 
-> Run Claude Managed Agents (CMA) tool execution on Blaxel sandboxes. Anthropic runs the agent loop (the "brain"); Blaxel runs tool execution (the "hands"). Both roles are Blaxel sandboxes: an orchestrator sandbox (a FastAPI webhook on a public preview URL) and a worker sandbox (`ant beta:worker poll`). This is the self-hosted / advanced reference path. If you are an AI agent working in this repo, read AGENTS.md first.
+> Run Claude Managed Agents (CMA) tool execution on Blaxel sandboxes. Anthropic hosts the agent loop; Blaxel sandboxes run the tools. This self-hosted cookbook uses two sandboxes: an orchestrator sandbox (a FastAPI webhook on a public preview URL) and a worker sandbox (`ant beta:worker poll`). If you are an AI agent working in this repo, read AGENTS.md first.
 
 ## The three credentials (keep them straight)
 
@@ -30,9 +30,9 @@
 
 ## Commands
 
-- `pytest`: orchestrator unit tests (local, safe).
-- `python example/run_session.py --local-worker`: validate the worker without a webhook (creates a real Anthropic session + Blaxel sandbox).
-- `python setup.py`: deploy the orchestrator and print the webhook URL.
+- `python3 -m pytest`: orchestrator unit tests (local, safe).
+- `python3 example/run_session.py --local-worker`: validate the worker without a webhook (creates a real Anthropic session + Blaxel sandbox).
+- `python3 setup.py`: deploy the orchestrator and print the webhook URL.
 
 ## Invariants
 

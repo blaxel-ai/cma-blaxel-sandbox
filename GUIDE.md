@@ -1,12 +1,12 @@
 # Run Claude Managed Agent tools with Blaxel Sandboxes
 
-Claude Managed Agents (CMA) lets Anthropic run the agent loop (the model, tool-calling, skills, and memory) while **tool execution happens on infrastructure you control**. When Claude decides to run a tool, something on your side has to execute it and post the result back. This guide shows how to make that "something" a **Blaxel sandbox**: a secure microVM that scales to zero when idle and resumes in milliseconds.
+Claude Managed Agents (CMA) lets Anthropic run the agent loop (the model, tool-calling, skills, and memory) while **tool execution happens on infrastructure you control**. When Claude decides to run a tool, your infrastructure executes it and posts the result back. This guide shows how to use **Blaxel sandboxes** for that tool execution.
 
-This is the **self-hosted / advanced reference** path for teams that want to own the webhook control plane themselves.
+This is the **self-hosted** path for teams that want to own the webhook control plane themselves.
 
 ## Architecture
 
-Anthropic hosts the brain; Blaxel provides the hands. Two roles, both Blaxel sandboxes:
+Anthropic hosts the agent loop. Blaxel sandboxes run the tools. There are two sandbox roles:
 
 ```
 Anthropic (orchestration)
@@ -55,9 +55,10 @@ This is the standard control-plane plus per-session compute-plane split, with no
 
 - A Blaxel workspace, the `bl` CLI, and a **service-account API key** (`BL_API_KEY`). Create one under Service Accounts. The orchestrator needs it to spawn worker sandboxes.
 - Access to Claude Managed Agents (the `managed-agents-2026-04-01` beta).
-- Two Anthropic credentials, used in different places:
+- Three Anthropic values, used in different places:
   - **`ANTHROPIC_API_KEY`:** your standard API key, for the control-plane calls in steps 1, 3, and 5 (create environment, agent, session).
-  - **`ANTHROPIC_ENVIRONMENT_KEY`** (`sk-ant-oat01-…`): generated per environment in step 1; this is what the worker uses to authenticate to the work queue.
+  - **`ANTHROPIC_ENVIRONMENT_KEY`** (`sk-ant-oat01-...`): generated per environment in step 1; this is what the worker uses to authenticate to the work queue.
+  - **`ANTHROPIC_WEBHOOK_SIGNING_KEY`** (`whsec_...`): generated when you create the webhook in step 4; this is what the orchestrator uses to verify webhook deliveries.
 - The `ant` CLI is baked into the worker image (step 2), so there is nothing to install locally.
 - **Docker** (for `bl push` and the worker smoke test).
 
@@ -86,7 +87,7 @@ export ANTHROPIC_ENVIRONMENT_ID=$(curl -sS https://api.anthropic.com/v1/environm
 echo "environment: $ANTHROPIC_ENVIRONMENT_ID"
 ```
 
-Then in the Anthropic Console (console.anthropic.com), go to **Manage > Environments**, open the environment by name, and click **Generate environment key**. Export the `sk-ant-oat01-…` key; the orchestrator forwards it to each worker:
+Then in the Anthropic Console (console.anthropic.com), go to **Manage > Environments**, open the environment by name, and click **Generate environment key**. Export the `sk-ant-oat01-...` key; the orchestrator forwards it to each worker:
 
 ```bash
 export ANTHROPIC_ENVIRONMENT_KEY=sk-ant-oat01-...
@@ -108,16 +109,21 @@ The orchestrator is a Blaxel sandbox running this webhook server. It verifies th
 @app.post("/webhook")
 async def webhook(request: Request):
     raw = await request.body()
+    if not os.environ.get("ANTHROPIC_WEBHOOK_SIGNING_KEY"):
+        # Not configured yet (re-run setup.py with the whsec_ key): say so plainly
+        # instead of masking it as a signature failure.
+        return JSONResponse({"error": "webhook signing key not configured"}, status_code=503)
     try:
         event = client.beta.webhooks.unwrap(raw.decode(), headers=dict(request.headers))
     except Exception:
-        return JSONResponse({"error": "invalid signature"}, status_code=401)
+        return JSONResponse({"error": "signature verification failed"}, status_code=401)
     if event.data.type == "session.status_run_started":
         # Await the spawn: holding the inbound webhook connection open keeps the
-        # orchestrator sandbox active during the spawn (no standby mid-flight).
-        # The full app also serializes starts per session and skips duplicate
-        # webhook retries while the previous poller is still alive.
-        await _spawn_worker_once(event.data.id)   # event.data.id is the session id
+        # orchestrator sandbox active during the spawn (no standby mid-flight). The
+        # full app also serializes starts per session and skips duplicate webhook
+        # retries while the previous poller is still alive (see orchestrator/app.py).
+        if not await _spawn_worker_once(event.data.id):  # event.data.id is the session id
+            return JSONResponse({"error": "worker poller did not start"}, status_code=503)
     return {"status": "ok"}
 
 async def _spawn_worker(session_id: str):
@@ -143,18 +149,18 @@ The handler `await`s the spawn so the inbound webhook connection stays open whil
 
 ```bash
 (cd orchestrator && bl push --type sandbox)   # build + push the orchestrator image
-python setup.py                               # run from the repo root: creates the sandbox, prints the webhook URL
+python3 setup.py                              # run from the repo root: creates the sandbox, prints the webhook URL
 ```
 
 The orchestrator runs with `BL_API_KEY` and `BL_WORKSPACE` in its env so the in-sandbox SDK can spawn workers. Unlike a Blaxel Agent, a sandbox does not inherit a workspace identity, so you provide the service-account key.
 
 ## 4. Register the webhook
 
-In the Anthropic Console, go to **Manage > Webhooks** and create an endpoint at the printed preview URL (`https://<id>.preview.bl.run/webhook`), subscribed to `session.status_run_started`. Copy the one-time `whsec_…` signing secret, then re-run setup with it exported so the orchestrator can verify deliveries (until then, deliveries are rejected with 503):
+In the Anthropic Console, go to **Manage > Webhooks** and create an endpoint at the printed preview URL (`https://<id>.preview.bl.run/webhook`), subscribed to `session.status_run_started`. Copy the one-time `whsec_...` signing secret, then re-run setup with it exported so the orchestrator can verify deliveries (until then, deliveries are rejected with 503):
 
 ```bash
 export ANTHROPIC_WEBHOOK_SIGNING_KEY=whsec_...
-python setup.py
+python3 setup.py
 ```
 
 ## 5. Create an agent and run a session
@@ -167,35 +173,38 @@ export ANTHROPIC_AGENT_ID=$(curl -sS https://api.anthropic.com/v1/agents \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id') or sys.exit(json.dumps(d)))")
 echo "agent: $ANTHROPIC_AGENT_ID"
 
-python example/run_session.py
+python3 example/run_session.py
 ```
 
 The environment is selected per session (`environment_id` on session create), not on the agent. `run_session.py` creates a session, sends a message, and watches the transcript: the webhook fires, the orchestrator spawns a worker, the worker runs the tools in the sandbox and posts results back, and the agent completes its turn. Pass `--local-worker` to spawn the worker directly and validate the path before the webhook is wired.
 
-## Gotchas (validated)
+## Troubleshooting
 
-- **Standby and keep-alive (the big one).** A Blaxel sandbox standbys ~15s after its last *inbound* connection, snapshotting process and filesystem (and resuming in ms). The worker poller only makes *outbound* calls, so without intervention the worker standbys mid-session and the poll loop freezes. Launch the poller with `keep_alive: True` and a `timeout` cap (or `0` to run until it exits naturally) so the sandbox stays active until the session is done. The orchestrator handles its webhook *synchronously*, so the open inbound connection keeps it active during the spawn; it then standbys and resumes on the next webhook.
-- **Webhook verification needs `anthropic[webhooks]`.** The orchestrator calls `client.beta.webhooks.unwrap()`; with plain `anthropic` it raises "install anthropic[webhooks]" and every delivery 401s (the request is fine, the dependency is missing). The extra is pinned in `orchestrator/requirements.txt`.
-- **The worker image is the agent's runtime.** Whatever the agent executes (python, node, compilers, CLIs) must be installed in the worker image. The default ships `node` (from the base) and `python3`; extend the worker Dockerfile with the languages and tools your agents need.
-- **`bash` needs `/bin/bash`.** The Debian base includes it (Alpine would not); skill download also needs `unzip` and `tar`.
-- **Working directory.** The worker runs with `--workdir /workspace` and *without* `--unrestricted-paths`, so file tools stay contained to `/workspace`. Absolute paths like `/workspace/hello.txt` passed to file tools are REJECTED with "absolute path not permitted"; always use bare relative paths (`hello.txt`, not `/workspace/hello.txt`). Shell (bash) commands are unrestricted and use `/workspace/...` paths. `--unrestricted-paths` removes that containment; only add it if your agent genuinely needs to touch paths outside `/workspace`, and understand the exposure first.
-- **Sandbox names.** Blaxel sandbox names must be lowercase alphanumerics and hyphens; session ids (`sesn_01Ab…`) contain underscores and mixed case, so sanitize before naming a worker.
-- **Orchestrator credential.** A sandbox does not get an auto-injected Blaxel identity (an Agent does), so pass a service-account `BL_API_KEY`.
-- **Duplicate webhooks / later turns.** Anthropic can retry `session.status_run_started`, and the same session can get later turns. The orchestrator serializes starts per session, skips duplicate starts for the `ANT_MAX_IDLE` window (override with `ANT_RESTART_COOLDOWN`), and uses a unique poller process name for each real restart so completed process records do not block later turns.
-- **Worker `--max-idle`** (default `60s`, override with `ANT_MAX_IDLE`) should be generous enough to span the agent's reasoning between tool calls.
-- **Tool output must be non-empty.** A shell command that prints nothing (e.g. `echo A > file`, which redirects stdout) makes the worker post an empty tool result, which the API rejects with `400 … minimum string length is 1` and the session stalls. Have the agent append a status echo (the sample system prompt asks for this), or wrap commands so they always emit something.
-- **Retrieving outputs.** Tool writes land in `/workspace`; the agent's final artifacts go to `/mnt/session/outputs`. Nothing is auto-exported — read them back through the sandbox filesystem API (`sandbox.fs.read(...)`) or serve them on a preview URL.
-- **Credential scope.** The worker holds `ANTHROPIC_ENVIRONMENT_KEY` in its env, which the agent's own `bash` tool can read. That is acceptable because it is a scoped, revocable per-environment key (it can only act on that environment's sessions) — never put your org `ANTHROPIC_API_KEY` on the worker.
-- **Teardown.** The worker self-deletes via its TTL once idle. The orchestrator sandbox and its public preview URL persist until you remove them. Delete the orchestrator when done:
+| Symptom or decision | What to do |
+| --- | --- |
+| Worker freezes mid-session | Launch the poller with `keep_alive: True` and a timeout cap. The poller only makes outbound calls, so the sandbox can standby without keep-alive. |
+| Webhook returns 503 before signature verification | Re-run `python3 setup.py` after exporting `ANTHROPIC_WEBHOOK_SIGNING_KEY`. |
+| Webhook returns 401 | Confirm the `whsec_...` secret and keep `anthropic[webhooks]` in `orchestrator/requirements.txt`. |
+| Agent needs Python packages, CLIs, or compilers | Add them to `worker/Dockerfile`. The worker image is the agent runtime. |
+| File tools reject `/workspace/...` paths | Pass bare relative paths like `hello.txt`. File tools are already contained to `/workspace`. |
+| Shell tool result is empty | Make every command print something, for example append `&& echo ok` after redirects. |
+| Later turns or webhook retries create conflicts | Keep per-session duplicate suppression and unique poller process names. Completed process records persist. |
+| Worker sandbox name is invalid | Sanitize Anthropic session ids to lowercase alphanumerics and hyphens before using them as Blaxel sandbox names. |
+| Worker cannot spawn other sandboxes | Pass a service-account `BL_API_KEY`; a sandbox does not receive an automatic workspace identity. |
+| Outputs are missing | Read files back from `/workspace` or `/mnt/session/outputs`; nothing is auto-exported. |
+| Credential boundary is unclear | The worker holds the scoped `ANTHROPIC_ENVIRONMENT_KEY`, and the agent's shell can read worker env vars. Never put the org `ANTHROPIC_API_KEY` on the worker. |
+| Anthropic API returns 401 | The standard `ANTHROPIC_API_KEY` is invalid or lacks CMA beta access. Run the preflight check. |
+| Resources are not visible in Console | The API key likely belongs to a different Anthropic org/workspace than the Console tab. |
 
-  ```bash
-  bl delete sandbox cma-orchestrator-app
-  ```
+## Teardown
 
-  Or via the Blaxel Console, or with the SDK: `await SandboxInstance.delete("cma-orchestrator-app")`.
+The worker self-deletes via its TTL once idle. The orchestrator sandbox and its public preview URL persist until you remove them. Delete the orchestrator when done:
 
-- **401 invalid x-api-key:** your `ANTHROPIC_API_KEY` is invalid or lacks Claude Managed Agents beta access. Run the preflight check in the section above.
-- **Resources created but not visible in the Anthropic Console:** the key belongs to a different org/workspace than the one you are viewing. Confirm the key's org matches the Console you have open.
+```bash
+bl delete sandbox cma-orchestrator-app
+```
+
+Or via the Blaxel Console, or with the SDK: `await SandboxInstance.delete("cma-orchestrator-app")`.
 
 ## Links
 

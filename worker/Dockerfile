@@ -2,9 +2,12 @@
 # executes code, and on musl a routine `pip install numpy/pandas` falls back to
 # slow/failing source builds. glibc gets real manylinux wheels. node comes from
 # the base image; bash is already present (Alpine would lack it).
-FROM node:22-bookworm-slim
+# Keep the image linux/amd64 so it matches the Blaxel sandbox API image copied
+# below and builds consistently on Apple Silicon Docker hosts.
+FROM --platform=linux/amd64 ghcr.io/blaxel-ai/sandbox:latest AS blaxel-sandbox
+FROM --platform=linux/amd64 node:22-bookworm-slim
 
-COPY --from=ghcr.io/blaxel-ai/sandbox:latest /sandbox-api /usr/local/bin/sandbox-api
+COPY --from=blaxel-sandbox /sandbox-api /usr/local/bin/sandbox-api
 
 # The worker image is the agent's execution environment, so it ships the runtimes
 # and tools the agent uses. python3 + pip is the common second runtime (node is in
