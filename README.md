@@ -4,34 +4,6 @@ Anthropic runs the Claude Managed Agents loop. Blaxel runs the self-hosted tool 
 
 In one pass, you can see Claude write a file and run a shell command inside a Blaxel worker sandbox before you touch webhooks.
 
-After setup below, the first proof command is:
-
-```bash
-python3 example/run_session.py --local-worker
-```
-
-```text
-tool: write {"content": "hello from blaxel", "file_path": "hello.txt"}
-tool: bash {"command": "cat /workspace/hello.txt && echo"}
-final agent message: ... hello from blaxel ...
-```
-
-## System Shape
-
-```text
-Claude Managed Agents
-  session + environment queue
-        |
-        | worker polls and claims work
-        v
-Blaxel worker sandbox
-  built-in tools run in /workspace
-```
-
-- Prove the worker first with `example/run_session.py --local-worker`.
-- Add the webhook only after the worker path works.
-- Customize the agent runtime by editing `worker/Dockerfile`.
-
 ## Before You Start
 
 You need:
@@ -60,6 +32,22 @@ Load it:
 ```bash
 set -a; source .env; set +a
 ```
+
+## System Shape
+
+```text
+Claude Managed Agents
+  session + environment queue
+        |
+        | worker polls and claims work
+        v
+Blaxel worker sandbox
+  built-in tools run in /workspace
+```
+
+- Prove the worker first with `example/run_session.py --local-worker`.
+- Add the webhook only after the worker path works.
+- Customize the agent runtime by editing `worker/Dockerfile`.
 
 ## Quickstart: Prove The Worker
 
