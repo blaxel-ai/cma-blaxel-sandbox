@@ -8,11 +8,26 @@ In one pass, you can see Claude write a file and run a shell command inside a Bl
 
 You need:
 
-- A Blaxel workspace, `bl` CLI, Docker, `BL_WORKSPACE`, and a service-account `BL_API_KEY`.
-- [Claude Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview) beta access and an `ANTHROPIC_API_KEY`.
+- A [Blaxel workspace](https://docs.blaxel.ai/Get-started) and workspace name for `BL_WORKSPACE`. [Open workspaces](https://app.blaxel.ai/account/workspaces) in the Blaxel Console.
+- The [`bl` CLI](https://docs.blaxel.ai/cli-reference/introduction), logged in to that workspace.
+- [Docker](https://docs.docker.com/get-started/get-docker/) running locally.
+- A [Blaxel API key](https://docs.blaxel.ai/api-reference/introduction) for a service account with access to the workspace; use it as `BL_API_KEY`. [Create one here](https://app.blaxel.ai/workspace/settings/service-accounts) after selecting your workspace.
+- [Claude Managed Agents](https://platform.claude.com/docs/en/managed-agents/overview) beta access and an `ANTHROPIC_API_KEY`. [Create an Anthropic API key](https://platform.claude.com/settings/keys).
 - `python3`.
 
-Install local deps and create your env file:
+Set up local tooling. The [Blaxel skills](https://docs.blaxel.ai/skills-mcp) step is optional; use it if you want your AI coding agent to understand Blaxel deployments and sandboxes.
+
+```bash
+# macOS. For Linux or Windows, use the bl CLI install docs linked above.
+brew tap blaxel-ai/blaxel
+brew install blaxel
+bl login
+
+# Optional, requires npm: give your AI coding agent Blaxel deployment and sandbox skills.
+npx skills add blaxel-ai/agent-skills
+```
+
+Install repo deps and create your env file:
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
