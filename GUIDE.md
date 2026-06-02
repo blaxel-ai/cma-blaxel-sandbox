@@ -114,7 +114,7 @@ Save the printed `ANTHROPIC_ENVIRONMENT_ID`, then generate `ANTHROPIC_ENVIRONMEN
 4. Build the worker:
 
 ```bash
-( cd worker && bl push --type sandbox )
+( cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox )
 ```
 
 5. Create the agent:
@@ -135,9 +135,10 @@ Success looks like:
 session: sesn_...
 message sent
 [local-worker] cma-worker-... is polling the queue as ant-poll-...
-  tool: write ...
-  tool: bash ...
-final agent message: ...
+  tool: write {"content": "hello from blaxel", "file_path": "hello.txt"}
+  tool: bash {"command": "cat /workspace/hello.txt && echo"}
+
+final agent message: ... hello from blaxel ...
 ```
 
 This proves the agent session, environment key, worker image, Blaxel sandbox creation, `ant` poller, file tools, bash tool, and result posting all work before the webhook is involved.
@@ -149,7 +150,7 @@ After the worker path works, add the webhook automation.
 1. Build the orchestrator image:
 
 ```bash
-( cd orchestrator && bl push --type sandbox )
+( cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox )
 ```
 
 2. Create or update the orchestrator sandbox:
@@ -167,10 +168,14 @@ Setup starts `uvicorn` in the orchestrator sandbox and prints:
 
 3. In the Anthropic Console, create a webhook for `session.status_run_started` pointing to that URL. Copy the one-time `whsec_...` signing secret.
 
-4. Rerun setup with the signing secret:
+4. Add the signing secret to `.env`, reload env, and rerun setup:
+
+```text
+ANTHROPIC_WEBHOOK_SIGNING_KEY=whsec_...
+```
 
 ```bash
-export ANTHROPIC_WEBHOOK_SIGNING_KEY=whsec_...
+set -a; source .env; set +a
 python3 setup.py
 ```
 
@@ -200,7 +205,7 @@ Common failures:
 
 | Symptom | Fix |
 | --- | --- |
-| Webhook returns 503 | Export `ANTHROPIC_WEBHOOK_SIGNING_KEY` and rerun `python3 setup.py`. |
+| Webhook returns 503 | Add `ANTHROPIC_WEBHOOK_SIGNING_KEY` to `.env`, reload env, and rerun `python3 setup.py`. |
 | Webhook returns 401 | Use the `whsec_...` value from the Anthropic Console and keep `anthropic[webhooks]` in the orchestrator image. |
 | Worker freezes | Start the poller with `keep_alive: True`; outbound polling alone does not hold the sandbox active. |
 | File tool rejects a path | Use `hello.txt`, not `/workspace/hello.txt`. |
@@ -211,7 +216,7 @@ Common failures:
 
 Blaxel is a strong fit for self-hosted CMA execution when you want:
 
-- A Docker-defined agent runtime with the exact languages, packages, CLIs, and compilers your tools need.
+- A batteries-included worker image by default, with a Dockerfile you can customize or slim for your stack.
 - One sandbox per session, named from the Anthropic session id and isolated from other sessions.
 - Public preview URLs for webhook receivers and for apps the agent creates during a session.
 - Process APIs and logs for seeing exactly what ran inside the sandbox.
@@ -220,10 +225,13 @@ Blaxel is a strong fit for self-hosted CMA execution when you want:
 
 The key difference from implementing a full custom runner is that the worker uses `ant beta:worker poll`. Anthropic's worker handles queue claiming and the built-in agent toolset; the Blaxel side supplies the runtime, lifecycle, and sandbox boundary.
 
+The included worker image is cloud-sandbox-compatible, not Anthropic-managed. It installs the language runtimes, package managers, database clients, and utilities from Anthropic's cloud sandbox reference and smokes the documented version floors, while still being a Dockerfile you own and can slim or pin for your stack.
+
 ## Operational gotchas
 
-- The worker image is the agent runtime. Add runtime dependencies to `worker/Dockerfile`.
-- Debian is intentional: `/bin/bash`, `tar`, and `unzip` are required by the agent toolset and skill downloads.
+- The worker image is the agent runtime. Add, remove, or pin runtime dependencies in `worker/Dockerfile`.
+- The final image is Debian/glibc on linux/amd64. It is compatible with the documented cloud sandbox tool surface, not byte-identical to Anthropic's Ubuntu 22.04 cloud image.
+- `/bin/bash`, `tar`, and `unzip` are required by the agent toolset and skill downloads.
 - The worker uses `--workdir /workspace` and does not use `--unrestricted-paths`.
 - `--max-idle` controls when the poller exits after the queue is quiet. Keep it long enough to span normal model thinking between tool calls.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is a cleanup backstop, not idle deletion, and should be longer than expected sessions.
@@ -237,7 +245,7 @@ The key difference from implementing a full custom runner is that the worker use
 The orchestrator sandbox and preview URL stay live until you remove them:
 
 ```bash
-bl delete sandbox cma-orchestrator-app
+bl delete sandbox cma-orchestrator-app --workspace "$BL_WORKSPACE"
 ```
 
 Worker sandboxes have a TTL max age. If a test worker is still present after a failed run, delete the matching `cma-worker-*` sandbox after the session is no longer active.

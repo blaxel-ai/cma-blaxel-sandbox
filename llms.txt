@@ -8,6 +8,7 @@
 - Self-hosted execution: tool runtime, filesystem, processes, and network boundary live in the user's infrastructure.
 - Blaxel orchestrator: FastAPI webhook on a public preview URL; verifies `session.status_run_started` and starts a worker.
 - Blaxel worker: `ant beta:worker poll`; claims the session work, runs tools in `/workspace`, posts results, and exits after `--max-idle`.
+- Worker image: self-hosted Docker image with `sandbox-api`, `ant`, and the language runtimes, package managers, database clients, and utilities from Anthropic's cloud sandbox reference. It smokes documented runtime floors, but it is not Anthropic's managed Ubuntu image.
 
 ## Credentials
 
@@ -21,10 +22,10 @@
 1. `python3 scripts/preflight.py`
 2. `python3 scripts/create_environment.py` -> `ANTHROPIC_ENVIRONMENT_ID`
 3. Generate `ANTHROPIC_ENVIRONMENT_KEY` in the Anthropic Console.
-4. `(cd worker && bl push --type sandbox)`
+4. `(cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox)`
 5. `python3 scripts/create_agent.py` -> `ANTHROPIC_AGENT_ID`
 6. `python3 example/run_session.py --local-worker`
-7. `(cd orchestrator && bl push --type sandbox)`
+7. `(cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox)`
 8. `python3 setup.py`, register webhook, export `ANTHROPIC_WEBHOOK_SIGNING_KEY`, rerun `python3 setup.py`
 9. `python3 example/run_session.py`
 
@@ -36,6 +37,7 @@
 - [scripts/](scripts): setup helpers; create scripts print exports and do not mutate `.env`.
 - [orchestrator/app.py](orchestrator/app.py): webhook verify, worker spawn, duplicate suppression, poller launch.
 - [worker/Dockerfile](worker/Dockerfile): agent runtime image.
+- [worker/smoke.sh](worker/smoke.sh): command-surface and runtime-version smoke test for the worker image.
 - [example/run_session.py](example/run_session.py): E2E example; `--local-worker` skips webhook.
 - [tests/](tests): local tests.
 
@@ -50,5 +52,6 @@
 ## Links
 
 - Anthropic self-hosted sandboxes: https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes
+- Anthropic cloud sandbox reference: https://platform.claude.com/docs/en/managed-agents/cloud-sandboxes-reference
 - Anthropic Managed Agents overview: https://platform.claude.com/docs/en/managed-agents/overview
 - Blaxel docs: https://docs.blaxel.ai
