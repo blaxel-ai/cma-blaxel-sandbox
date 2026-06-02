@@ -7,13 +7,12 @@ registered as the Anthropic webhook target.
 Design:
   - On `session.status_run_started`, spawn ONE worker sandbox and return 200.
   - The orchestrator never polls/claims/babysits the work queue.
-  - The worker self-claims by running `ant beta:worker poll` and exits on idle;
-    a TTL auto-cleans the worker sandbox. No orchestrator-side supervision.
+  - The worker self-claims by running `ant beta:worker poll` and exits after
+    queue idle; TTL is a max-age cleanup backstop. No orchestrator-side
+    supervision.
 
-Running in a sandbox (rather than as a long-lived HTTP service) means the
-process persists across scale-to-zero/standby with memory intact and resumes on
-the inbound webhook, so background spawning is safe and there is no
-execution-time ceiling on the handler.
+Running in a sandbox gives the webhook a public preview URL and lets the
+process resume with the sandbox on the next inbound webhook.
 """
 import asyncio
 import os
@@ -145,7 +144,7 @@ async def _spawn_worker(session_id: str) -> bool:
     (re)start the poller below, needed when the previous turn's poller already
     exited on --max-idle. Overlapping pollers are harmless because the queue
     hands each work item to a single claimer. The TTL (max-age from creation)
-    auto-deletes the sandbox as a cleanup backstop, so there is no
+    eventually removes the sandbox as a cleanup backstop, so there is no
     orchestrator-side delete to babysit; keep it well above a session's length.
     """
     name = _worker_name(session_id)
@@ -160,7 +159,7 @@ async def _spawn_worker(session_id: str) -> bool:
         "name": name,
         "image": worker_image,
         "memory": 4096,
-        "ttl": worker_ttl,        # self-cleaning: no orchestrator-side delete
+        "ttl": worker_ttl,        # max-age cleanup backstop: no orchestrator-side delete
         "envs": envs,
     }
     if worker_region:
@@ -173,8 +172,8 @@ async def _spawn_worker(session_id: str) -> bool:
     # and shuts down after --max-idle. keep_alive holds the sandbox active for
     # the whole session; without it the sandbox standbys ~15s after spawn and
     # the poll loop freezes mid-session. We do NOT wait_for_completion and we do
-    # NOT delete; the worker owns its own lifecycle (the TTL handles cleanup once
-    # the poller has exited and the sandbox goes idle).
+    # NOT delete; the worker owns its own lifecycle (the TTL handles max-age
+    # cleanup after sandbox creation).
     #
     # Give each poller launch a unique process name. Process records survive
     # completion, so reusing `ant-poll` makes later turns or webhook retries fail

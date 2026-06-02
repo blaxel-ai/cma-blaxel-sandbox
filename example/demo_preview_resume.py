@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Demo: a Claude Managed Agent authors an app, it's served on a Blaxel public
-preview URL, and the running server survives standby and resumes LIVE — the
-same process, not a cold reboot. No other CMA sandbox provider can show this.
+"""Demo: a Claude Managed Agent authors an app, serves it on a Blaxel public
+preview URL, and checks the server process before and after sandbox standby.
 
 Flow:
   1. Create a session; the agent uses its bash tool to author app.py in /workspace.
   2. The harness starts that app as a long-lived sandbox process on :3000 (CMA
      tool calls are request-scoped, so a server must be supervised, not
      backgrounded inside one tool call) and exposes it on a public preview URL.
-  3. Drop the poller, idle until the sandbox scales to zero (standby), then hit
-     the preview again: the server resumes with the SAME pid, proving the live
-     process (not just files) was snapshotted and restored.
+  3. Drop the poller, idle until the sandbox standbys, then hit the preview
+     again and compare the server pid before and after resume.
 
 Env (same as run_session.py): ANTHROPIC_API_KEY, ANTHROPIC_ENVIRONMENT_ID,
 ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REGION].
-Run: python example/demo_preview_resume.py
+Run: python3 example/demo_preview_resume.py
 """
 import asyncio, json, os, re, time, urllib.request, urllib.error
 from uuid import uuid4
@@ -176,7 +174,7 @@ async def main():
     print(f"  agent-authored app.py                    : {authored}")
     print(f"  app reachable on preview URL             : {st == 200}")
     print(f"  same server pid across standby/resume       : {pid_warm} == {pid_cold}")
-    print(f"  resume round-trip after standby             : {ms2:.0f} ms (Blaxel internal resume ~25ms; rest is network)")
+    print(f"  resume round-trip after standby             : {ms2:.0f} ms incl. network")
     print(f"\n  Click it: {app_url}")
     print(f"  Cleanup:  delete sandbox '{spec['name']}' when done.")
     print("=" * 64)
