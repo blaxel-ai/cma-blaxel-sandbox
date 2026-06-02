@@ -15,8 +15,9 @@ Run locally with your workspace selected:
     python3 setup.py
 
 The orchestrator needs BL_API_KEY + BL_WORKSPACE in its own env so the
-in-sandbox SDK can spawn worker sandboxes. The uvicorn process survives
-scale-to-zero/standby (verified), so an inbound webhook resumes it.
+in-sandbox SDK can spawn worker sandboxes. The uvicorn process is started as a
+long-lived sandbox process and resumes with the sandbox on the next inbound
+webhook.
 """
 import asyncio
 import os
