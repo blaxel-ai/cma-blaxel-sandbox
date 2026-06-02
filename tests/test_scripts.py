@@ -5,6 +5,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import cma_setup
+import create_agent
 
 
 def test_environment_payload_is_self_hosted():
@@ -15,9 +16,9 @@ def test_environment_payload_is_self_hosted():
 
 
 def test_agent_payload_uses_builtin_agent_toolset_and_relative_path_prompt():
-    payload = cma_setup.agent_payload("Coding Assistant", "claude-opus-4-7")
+    payload = cma_setup.agent_payload("Coding Assistant", "claude-opus-4-8")
     assert payload["name"] == "Coding Assistant"
-    assert payload["model"] == "claude-opus-4-7"
+    assert payload["model"] == "claude-opus-4-8"
     assert payload["tools"] == [{"type": "agent_toolset_20260401"}]
     assert "absolute paths like /workspace/hello.txt are REJECTED" in payload["system"]
     assert "Every tool call must produce non-empty output" in payload["system"]
@@ -43,3 +44,14 @@ def test_anthropic_headers_include_beta_and_content_type():
     assert headers["anthropic-version"] == "2023-06-01"
     assert headers["anthropic-beta"] == "managed-agents-2026-04-01"
     assert headers["content-type"] == "application/json"
+
+
+def test_agent_create_error_hints_when_model_is_rejected():
+    message = create_agent.format_agent_create_error(
+        400,
+        {"error": {"message": "model: unknown model"}},
+        "claude-opus-4-8",
+    )
+
+    assert "ANTHROPIC_AGENT_MODEL" in message
+    assert "claude-opus-4-8" in message

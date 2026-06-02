@@ -25,10 +25,10 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 1. `python3 scripts/preflight.py` checks local tooling and CMA access.
 2. `python3 scripts/create_environment.py` prints `export ANTHROPIC_ENVIRONMENT_ID=env_...`.
 3. Generate `ANTHROPIC_ENVIRONMENT_KEY` in the Anthropic Console environment page.
-4. `(cd worker && bl push --type sandbox)` publishes `sandbox/cma-worker:latest`.
+4. `(cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox)` publishes `sandbox/cma-worker:latest`.
 5. `python3 scripts/create_agent.py` prints `export ANTHROPIC_AGENT_ID=agent_...`.
 6. `python3 example/run_session.py --local-worker` validates the worker path without a webhook.
-7. `(cd orchestrator && bl push --type sandbox)` publishes `sandbox/cma-orchestrator:latest`.
+7. `(cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox)` publishes `sandbox/cma-orchestrator:latest`.
 8. `python3 setup.py` creates or updates the orchestrator and prints the webhook URL.
 9. Register the Anthropic webhook for `session.status_run_started`, copy `whsec_...`, export `ANTHROPIC_WEBHOOK_SIGNING_KEY`, then rerun `python3 setup.py`.
 10. `python3 example/run_session.py` runs the full webhook path.
@@ -58,7 +58,7 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 | `python3 example/run_session.py` | full webhook flow | creates real session; needs webhook/orchestrator |
 | `python3 example/demo_preview_resume.py` | preview URL + standby/resume behavior demo | creates real resources |
 | `python3 example/validate_long_session.py` | long keep-alive + filesystem-containment probe | creates real resources |
-| `bl push --type sandbox` | builds and publishes sandbox image | publishes to the selected workspace |
+| `bl push --workspace "$BL_WORKSPACE" --type sandbox` | builds and publishes sandbox image | publishes to the workspace loaded from `.env` |
 
 ## Where to look
 
@@ -66,7 +66,7 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 | -- | -- |
 | `scripts/` | local setup helpers; create scripts print exports and never mutate `.env` |
 | `orchestrator/app.py` | webhook verification, worker spawn, duplicate suppression, poller launch |
-| `worker/Dockerfile` | the agent runtime: `ant`, node, python3, bash, git, curl, tar, unzip |
+| `worker/Dockerfile` | the agent runtime: `ant`, cloud-sandbox-style language runtimes, database clients, and utilities |
 | `setup.py` | create/update orchestrator, restart webhook server with current env, print preview URL |
 | `example/run_session.py` | primary E2E example; `--local-worker` skips webhook |
 | `tests/` | local behavior tests |
