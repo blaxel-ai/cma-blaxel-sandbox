@@ -52,8 +52,8 @@ def test_worker_name_bounded_length():
 
 
 def test_process_name_uses_work_id_and_valid_chars():
-    name = app._process_name("work__01.AB/xy")
-    assert name.startswith("ant-run-work--01-ab-xy")
+    name = app._process_name("work__01.AB/xy", unique_suffix="abc123ef")
+    assert name == "ant-run-work--01-ab-xy-abc123ef"
     assert re.fullmatch(r"[a-z0-9-]+", name), name
 
 
@@ -127,6 +127,7 @@ async def test_dispatch_work_item_starts_ant_run_with_work_and_session_env(fake_
     }]
     probe, run = fake_sandbox.process.calls
     assert probe["command"] == "node -v"
+    assert run["name"].startswith("ant-run-work-123-")
     assert run["command"] == f"ant beta:worker run --workdir /workspace --max-idle {app.worker_max_idle}"
     assert run["wait_for_completion"] is False
     assert run["keep_alive"] is True
@@ -182,16 +183,33 @@ async def test_dispatch_work_item_uses_prepared_worker_without_readiness_probe(f
     )
 
 
-async def test_dispatch_suppresses_duplicate_work_id(fake_sandbox):
+async def test_dispatch_suppresses_currently_in_flight_work_id(fake_sandbox):
     process = FakeProcess()
     prepared_worker = SimpleNamespace(process=process)
     work = _session_work(work_id="work_dup", session_id="sesn_dup")
+    app._work_ids_in_flight.add("work_dup")
 
-    assert await app._dispatch_work_item(work, prepared_worker=prepared_worker) is True
     assert await app._dispatch_work_item(work, prepared_worker=prepared_worker) is True
 
     run_calls = [c for c in process.calls if "ant beta:worker run" in c["command"]]
-    assert len(run_calls) == 1
+    assert len(run_calls) == 0
+    assert fake_sandbox.created_specs == []
+
+
+async def test_successful_dispatch_clears_in_flight_for_reclaim_redelivery(fake_sandbox):
+    process = FakeProcess()
+    prepared_worker = SimpleNamespace(process=process)
+    work = _session_work(work_id="work_reclaim", session_id="sesn_reclaim")
+
+    assert await app._dispatch_work_item(work, prepared_worker=prepared_worker) is True
+    assert "work_reclaim" not in app._work_ids_in_flight
+    assert await app._dispatch_work_item(work, prepared_worker=prepared_worker) is True
+
+    run_calls = [c for c in process.calls if "ant beta:worker run" in c["command"]]
+    assert len(run_calls) == 2
+    assert run_calls[0]["name"].startswith("ant-run-work-reclaim-")
+    assert run_calls[1]["name"].startswith("ant-run-work-reclaim-")
+    assert run_calls[0]["name"] != run_calls[1]["name"]
     assert fake_sandbox.created_specs == []
 
 

@@ -78,9 +78,10 @@ def _worker_name(session_id: str) -> str:
     return f"cma-worker-{safe_id[:40]}"
 
 
-def _process_name(work_id: str) -> str:
+def _process_name(work_id: str, unique_suffix: str | None = None) -> str:
     safe_id = re.sub(r"[^a-z0-9-]", "-", work_id.lower())
-    return f"ant-run-{safe_id[:48]}"
+    suffix = unique_suffix or uuid4().hex[:8]
+    return f"ant-run-{safe_id[:40]}-{suffix}"
 
 
 def _duration_to_seconds(value: str, default: int) -> int:
@@ -260,36 +261,41 @@ async def _dispatch_work_item(work, *, prepared_worker=None) -> bool:
     # the claimed item; a dispatcher-side heartbeat would change the expected
     # lease token and can make the stock worker lose the handoff. Keep this gap
     # short by readying the sandbox before the SDK claim and bounding retries.
-    for attempt in range(worker_run_attempts):
-        try:
-            await worker.process.exec({
-                "name": process_name,
-                "command": f"ant beta:worker run --workdir /workspace --max-idle {worker_max_idle}",
-                "wait_for_completion": False,
-                "keep_alive": True,
-                "timeout": worker_keepalive_timeout,
-                "env": process_env,
-            })
-            logger.info(
-                "worker %s running %s for session %s",
-                name,
-                process_name,
-                session_id,
-            )
-            return True
-        except Exception as exc:
-            if attempt in (0, 4, 9, worker_run_attempts - 1):
-                logger.warning(
-                    "worker %s ant run start attempt %d failed: %r",
+    try:
+        for attempt in range(worker_run_attempts):
+            try:
+                await worker.process.exec({
+                    "name": process_name,
+                    "command": f"ant beta:worker run --workdir /workspace --max-idle {worker_max_idle}",
+                    "wait_for_completion": False,
+                    "keep_alive": True,
+                    "timeout": worker_keepalive_timeout,
+                    "env": process_env,
+                })
+                logger.info(
+                    "worker %s running %s for session %s",
                     name,
-                    attempt + 1,
-                    exc,
+                    process_name,
+                    session_id,
                 )
-            await asyncio.sleep(2)
-    logger.error("worker %s never accepted ant run command %s", name, process_name)
-    _work_ids_in_flight.discard(work.id)
-    await _stop_work(work, force=True)
-    return False
+                return True
+            except Exception as exc:
+                if attempt in (0, 4, 9, worker_run_attempts - 1):
+                    logger.warning(
+                        "worker %s ant run start attempt %d failed: %r",
+                        name,
+                        attempt + 1,
+                        exc,
+                    )
+                await asyncio.sleep(2)
+        logger.error("worker %s never accepted ant run command %s", name, process_name)
+        await _stop_work(work, force=True)
+        return False
+    finally:
+        # This set only protects the local claim-to-process-start handoff. Once
+        # Blaxel accepts the process, `ant run` owns the lease. If it dies before
+        # heartbeating, Anthropic reclaim must be able to re-deliver this work id.
+        _work_ids_in_flight.discard(work.id)
 
 
 async def _drain_and_dispatch_work(*, prepared_workers: dict[str, object] | None = None) -> bool:

@@ -218,7 +218,7 @@ Common failures:
 | Worker freezes | Start the worker process with `keep_alive: True`; outbound-only traffic does not hold the sandbox active. |
 | File tool rejects a path | Use `hello.txt`, not `/workspace/hello.txt`. |
 | Shell result is empty | Append output such as `&& echo ok`. |
-| Later turn does not start | Use unique `ant-run-*` process names derived from the `work_...` id. Process records persist after completion. |
+| Later turn or reclaim retry does not start | Use unique `ant-run-*` process names derived from the `work_...` id plus a suffix. Process records persist after completion. |
 
 ## Why Blaxel Sandboxes
 
@@ -241,7 +241,7 @@ The included worker image is cloud-sandbox-compatible, not Anthropic-managed. It
 - The worker uses `--workdir /workspace` and does not use `--unrestricted-paths`.
 - `--max-idle` controls when `ant beta:worker run` exits after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is a cleanup backstop, not idle deletion, and should be longer than expected sessions.
-- Duplicate webhook deliveries are safe because dispatch waits briefly to collect near-simultaneous sessions, pre-readies known active session sandboxes before claiming, suppresses duplicate session schedules and in-flight work ids in-process, and relies on the SDK claim step for durable queue idempotency. If no work is found, another dispatcher may already have claimed it.
+- Duplicate webhook deliveries are safe because dispatch waits briefly to collect near-simultaneous sessions, pre-readies known active session sandboxes before claiming, suppresses duplicate session schedules and currently in-flight work handoffs in-process, and relies on the SDK claim step for durable queue idempotency. If no work is found, another dispatcher may already have claimed it.
 - Sandbox names allow lowercase alphanumerics and hyphens. Anthropic session ids are sanitized before becoming worker names.
 - This sample passes a service-account `BL_API_KEY` to the orchestrator so it can create worker sandboxes.
 - Nothing is auto-exported from the worker. Read files back from `/workspace`, or expose an app through a preview URL.

@@ -82,7 +82,7 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 - `--max-idle` controls when `ant beta:worker run` exits after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is not idle deletion and should be longer than expected sessions.
 - Worker sandbox names must be lowercase alphanumerics and hyphens; sanitize Anthropic session ids.
-- Duplicate webhook deliveries are safe because dispatch scheduling is suppressed per session in-process, work ids already being dispatched are suppressed in-process, and SDK work claiming is durable; if no queued work remains, another dispatcher likely claimed it.
+- Duplicate webhook deliveries are safe because dispatch scheduling is suppressed per session in-process, currently-starting work handoffs are suppressed in-process, and SDK work claiming is durable; if no queued work remains, another dispatcher likely claimed it.
 
 ## Safe vs. company-facing
 

@@ -254,7 +254,7 @@ Never put the org `ANTHROPIC_API_KEY` on the worker. The worker receives only th
 | Tool result is rejected as empty | Shell commands must print something. Append `&& echo ok` after silent redirects. |
 | Webhook returns 503 | Rerun `python3 setup.py` after exporting `ANTHROPIC_WEBHOOK_SIGNING_KEY`; if the key is present, inspect the event payload for a missing session id. Worker-start failures happen after the webhook 200 and show up in orchestrator logs. |
 | Webhook returns 401 | Confirm the `whsec_...` secret and that `anthropic[webhooks]` is installed in the orchestrator image. |
-| Later turns do not start | Work process names must be unique by `work_...` id. Completed process records persist. |
+| Later turns or reclaim retries do not start | Work process names must be derived from `work_...` ids and include a unique suffix. Completed process records persist. |
 | Output files are missing | File tools write under `/workspace`; nothing is auto-exported. Bash can also write `/mnt/session/outputs`, but that path is not exposed to contained file tools without `--unrestricted-paths`. |
 
 ## How It Works

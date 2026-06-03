@@ -54,7 +54,7 @@
 - `ant beta:worker run` owns the work heartbeat; the dispatcher collects near-simultaneous session starts, readies known active session sandboxes before claiming, and then starts exact work promptly.
 - `--max-idle` controls worker exit after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation, not idle deletion.
-- Work process names are derived from `work_...` ids because Blaxel process records persist after completion.
+- Work process names are derived from `work_...` ids plus a unique suffix because Blaxel process records persist after completion and reclaimed work may need a fresh process.
 
 ## Links
 

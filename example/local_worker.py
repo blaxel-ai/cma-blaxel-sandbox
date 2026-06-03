@@ -38,9 +38,10 @@ def worker_name(session_id: str) -> str:
     return f"cma-worker-{safe_id[:40]}"
 
 
-def process_name(work_id: str) -> str:
+def process_name(work_id: str, unique_suffix: str | None = None) -> str:
     safe_id = re.sub(r"[^a-z0-9-]", "-", work_id.lower())
-    return f"ant-run-{safe_id[:48]}"
+    suffix = unique_suffix or uuid4().hex[:8]
+    return f"ant-run-{safe_id[:40]}-{suffix}"
 
 
 def work_session_id(work) -> str | None:
@@ -144,9 +145,10 @@ async def dispatch_work_item(
             "env": env,
         })
     except Exception:
-        _work_ids_in_flight.discard(work.id)
         await stop_work(client, work, force=True)
         raise
+    finally:
+        _work_ids_in_flight.discard(work.id)
 
     print(f"[{label}] {sandbox_name} is running {work.id} as {proc_name}")
     return DispatchResult(
