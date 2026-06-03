@@ -237,6 +237,8 @@ python3 example/run_session.py
 
 Checkpoint: the transcript should look like the worker-only run: session id, tool calls, final message containing `hello from blaxel`, and `EXAMPLE: PASS`.
 
+`EXAMPLE: PASS` here confirms the session completed, not that this orchestrator's worker served it. If another claimant shares the environment, the transcript can pass while a different worker did the work. To prove this path, check that the matching `cma-worker-<session>` sandbox shows the expected `ant-run-*` process, or read the orchestrator logs for the claimed `work_...` id.
+
 This command also expects a quiet self-hosted environment before it creates the session. If it reports `workers_polling`, stop other workers using the same `ANTHROPIC_ENVIRONMENT_ID` or create a fresh environment for the proof.
 
 ## Keys You Need
@@ -262,7 +264,7 @@ Never put the org `ANTHROPIC_API_KEY` on the worker. The worker receives only th
 | Worker freezes mid-session | The `ant run` process must start with `keep_alive: True`; outbound-only worker traffic does not by itself keep a Blaxel sandbox active. |
 | File tool rejects `/workspace/...` | File tools are scoped to `/workspace` but require relative paths like `hello.txt`. Bash commands can still use absolute paths inside the container. |
 | Worker-only run uses `/workspace/hello.txt` with the write tool | You are probably using an old agent. Rerun `python3 scripts/create_agent.py`, replace `ANTHROPIC_AGENT_ID` in `.env`, reload env, and rerun. |
-| Example proof reports `workers_polling` | Another worker is polling this self-hosted environment. Stop the environment-polling worker, webhook dispatcher, or other cookbook worker using the same `ANTHROPIC_ENVIRONMENT_ID`, or create a fresh environment for the proof. |
+| Example proof reports `workers_polling` | Another worker is polling this self-hosted environment. Stop the environment-polling worker, webhook dispatcher, or other cookbook worker using the same `ANTHROPIC_ENVIRONMENT_ID`, or create a fresh environment for the proof. A worker that just finished can keep `workers_polling` nonzero for up to ~30s, so wait that long and retry before assuming a competing claimant. |
 | Tool result is rejected as empty | Shell commands must print something. Append `&& echo ok` after silent redirects. |
 | Webhook returns 503 | Rerun `python3 setup.py` after exporting `ANTHROPIC_WEBHOOK_SIGNING_KEY`; if the key is present, inspect the event payload for a missing session id. Worker-start failures happen after the webhook 200 and show up in orchestrator logs. |
 | Webhook returns 401 | Confirm the `whsec_...` secret and that `anthropic[webhooks]` is installed in the orchestrator image. |
@@ -343,6 +345,8 @@ If a worker is still around while testing, delete the matching worker sandbox af
 ```bash
 bl delete sandbox cma-worker-sesn-... --workspace "$BL_WORKSPACE"
 ```
+
+If you delete the orchestrator, also remove or disable the Anthropic webhook in the Console. The webhook was registered against the orchestrator's preview URL, so once that sandbox is gone the deliveries silently fail against a dead endpoint. Revoke the environment key and delete throwaway environments or agents when you are done testing.
 
 ## Links
 

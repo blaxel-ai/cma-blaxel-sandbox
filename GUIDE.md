@@ -201,6 +201,8 @@ python3 example/run_session.py
 
 Success is the same transcript shape as the local-worker run. The difference is that Anthropic now triggers the orchestrator, and the orchestrator claims and dispatches the work item.
 
+As with the local-worker run, `EXAMPLE: PASS` from the transcript only confirms the session completed. To prove this orchestrator handled it rather than another claimant on the same environment, check the `cma-worker-<session>` sandbox for the expected `ant-run-*` process, or read the orchestrator logs for the claimed `work_...` id.
+
 ## Observe and debug it
 
 Use these checkpoints when a session stalls:
