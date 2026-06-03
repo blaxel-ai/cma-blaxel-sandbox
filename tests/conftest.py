@@ -15,14 +15,16 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def reset_session_state():
-    """Each test starts and ends with clean per-session orchestrator state.
-
-    `_session_locks` / `_session_last_started_at` are module-level dicts that
-    persist across calls in a real run; isolate them per test.
-    """
-    app._session_locks.clear()
-    app._session_last_started_at.clear()
+def reset_dispatcher_lock():
+    """Each test leaves dispatcher process-local state in a clean state."""
+    assert not app._dispatcher_lock.locked()
+    app._background_tasks.clear()
+    app._scheduled_session_ids.clear()
+    app._worker_ready_tasks.clear()
+    app._work_ids_in_flight.clear()
     yield
-    app._session_locks.clear()
-    app._session_last_started_at.clear()
+    assert not app._dispatcher_lock.locked()
+    app._background_tasks.clear()
+    app._scheduled_session_ids.clear()
+    app._worker_ready_tasks.clear()
+    app._work_ids_in_flight.clear()

@@ -24,10 +24,14 @@ import os
 from uuid import uuid4
 
 from blaxel.core import SandboxInstance
+from blaxel.core.client.api.compute.update_sandbox import asyncio as update_sandbox
+from blaxel.core.client.client import client as blaxel_client
 
 NAME = os.environ.get("ORCHESTRATOR_NAME", "cma-orchestrator-app")
 IMAGE = os.environ.get("ORCHESTRATOR_IMAGE", "sandbox/cma-orchestrator:latest")
 PORT = int(os.environ.get("ORCHESTRATOR_PORT", "8000"))
+ORCHESTRATOR_TTL = os.environ.get("ORCHESTRATOR_TTL", "7d")
+ORCHESTRATOR_KEEPALIVE_TIMEOUT = int(os.environ.get("ORCHESTRATOR_KEEPALIVE_TIMEOUT", "0"))
 
 PASSTHROUGH = [
     "ANTHROPIC_ENVIRONMENT_ID",
@@ -40,9 +44,58 @@ PASSTHROUGH = [
     "BLAXEL_WORKER_IMAGE",
     "BLAXEL_WORKER_TTL",
     "ANT_MAX_IDLE",
-    "ANT_RESTART_COOLDOWN",
     "ANT_KEEPALIVE_TIMEOUT",
+    "ANT_DISPATCHER_POLL_BLOCK_MS",
+    "ANT_DISPATCHER_RECLAIM_MS",
+    "ANT_DISPATCHER_DEBOUNCE_MS",
+    "BLAXEL_WORKER_READY_ATTEMPTS",
+    "BLAXEL_WORKER_READY_SLEEP",
+    "ANT_RUN_START_ATTEMPTS",
 ]
+
+
+def _orchestrator_sandbox_body(envs: list[dict]) -> dict:
+    spec = {
+        "enabled": True,
+        "runtime": {
+            "image": IMAGE,
+            "memory": 2048,
+            "ttl": ORCHESTRATOR_TTL,
+            "envs": envs,
+            "ports": [
+                {"name": "sandbox-api", "target": 8080, "protocol": "HTTP"},
+                {"name": "webhook", "target": PORT, "protocol": "HTTP"},
+            ],
+        },
+    }
+    if region := os.environ.get("BL_REGION"):
+        spec["region"] = region
+    return {
+        "metadata": {"name": NAME},
+        "spec": spec,
+    }
+
+
+def _raise_if_resource_error(response) -> None:
+    if response is None:
+        raise RuntimeError("sandbox update failed: empty response")
+    if response.__class__.__name__ not in {"Error", "SandboxError"}:
+        return
+    code = getattr(response, "code", None)
+    status_code = getattr(response, "status_code", None)
+    message = getattr(response, "message", None) or str(response)
+    suffix = f" ({code})" if code else ""
+    raise RuntimeError(f"sandbox update failed{suffix}: {message} [status={status_code}]")
+
+
+async def _upsert_orchestrator_sandbox(body: dict) -> SandboxInstance:
+    # `create_if_not_exists` reuses an existing sandbox without applying runtime
+    # changes. Follow it with the generated update endpoint so a fresh image/env
+    # is applied on every setup rerun while preserving the stable sandbox name.
+    await SandboxInstance.create_if_not_exists(body)
+    updated = await update_sandbox(NAME, client=blaxel_client, body=body)
+    _raise_if_resource_error(updated)
+    return SandboxInstance(updated)
 
 
 def _is_webhook_server_process(name: str, command: str) -> bool:
@@ -57,14 +110,12 @@ def _is_webhook_server_process(name: str, command: str) -> bool:
 async def _restart_webhook_server(sbx, env_map: dict) -> str:
     """(Re)start the FastAPI webhook server with the CURRENT env, in place.
 
-    `create_if_not_exists` returns an existing sandbox WITHOUT applying env
-    changes, and a server already running baked its config at import time. So when
-    you add ANTHROPIC_WEBHOOK_SIGNING_KEY and re-run setup, the old server would
-    keep rejecting deliveries with 503. We kill the old server and start a fresh
-    one with the env passed at the PROCESS level (which merges onto the sandbox
-    env), so the current keys reach the server even though the sandbox env is
-    stale. We never recreate the sandbox, so its public preview URL -- already
-    registered as the Anthropic webhook -- stays stable.
+    The sandbox spec is updated before this, but a server already running baked
+    its config at import time. So when you add ANTHROPIC_WEBHOOK_SIGNING_KEY and
+    re-run setup, the old server would keep rejecting deliveries with 503. We
+    kill the old server and start a fresh one with the env passed at the PROCESS
+    level too. We keep the stable sandbox name so its public preview URL --
+    already registered as the Anthropic webhook -- stays stable.
     """
     try:
         for proc in await sbx.process.list():
@@ -82,6 +133,8 @@ async def _restart_webhook_server(sbx, env_map: dict) -> str:
         "command": f"python3 -m uvicorn app:app --host 0.0.0.0 --port {PORT}",
         "working_dir": "/app",
         "wait_for_completion": False,
+        "keep_alive": True,
+        "timeout": ORCHESTRATOR_KEEPALIVE_TIMEOUT,
         "env": env_map,  # process-level env delivers the current keys (incl. the
                          # webhook signing key) even when the sandbox env is stale
     })
@@ -95,16 +148,9 @@ async def main() -> None:
         if not os.environ.get(required):
             raise SystemExit(f"missing required env: {required}")
 
-    spec = {
-        "name": NAME,
-        "image": IMAGE,
-        "memory": 2048,
-        "envs": envs,
-    }
-    if region := os.environ.get("BL_REGION"):
-        spec["region"] = region
-    sbx = await SandboxInstance.create_if_not_exists(spec)
-    print(f"orchestrator sandbox '{NAME}' created; waiting for readiness...")
+    body = _orchestrator_sandbox_body(envs)
+    sbx = await _upsert_orchestrator_sandbox(body)
+    print(f"orchestrator sandbox '{NAME}' configured; waiting for readiness...")
 
     for attempt in range(45):
         try:

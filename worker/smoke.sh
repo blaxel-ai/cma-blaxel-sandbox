@@ -1,6 +1,6 @@
 #!/bin/sh
 # Smoke test for the CMA worker image: proves the runtime the agent's tool calls
-# depend on is present and that the poll command exists. The worker image IS the
+# depend on is present and that the run command exists. The worker image IS the
 # agent's execution environment, so this is the contract the orchestrator relies
 # on before spawning it.
 #
@@ -15,8 +15,8 @@ ok()   { echo "ok:   $1"; }
 
 version_ge() {
     awk -v got="$1" -v want="$2" 'BEGIN {
-        split(got, g, ".")
-        split(want, w, ".")
+        split(got, g, "[.]")
+        split(want, w, "[.]")
         for (i = 1; i <= 3; i++) {
             gv = g[i] + 0
             wv = w[i] + 0
@@ -59,8 +59,8 @@ require_min_version "GCC" "$(gcc -dumpfullversion -dumpversion)" "13"
 
 ant --version >/dev/null 2>&1 || fail "ant --version failed"
 ok "ant $(ant --version 2>/dev/null | head -1)"
-ant beta:worker poll --help >/dev/null 2>&1 || fail "ant beta:worker poll subcommand missing"
-ok "ant beta:worker poll available"
+ant beta:worker run --help >/dev/null 2>&1 || fail "ant beta:worker run subcommand missing"
+ok "ant beta:worker run available"
 bundle --version >/dev/null 2>&1 || fail "bundle --version failed"
 ok "$(bundle --version | head -1)"
 php --version >/dev/null 2>&1 || fail "php --version failed"

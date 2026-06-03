@@ -7,18 +7,19 @@ Flow:
   2. The harness starts that app as a long-lived sandbox process on :3000 (CMA
      tool calls are request-scoped, so a server must be supervised, not
      backgrounded inside one tool call) and exposes it on a public preview URL.
-  3. Drop the poller, idle until the sandbox standbys, then hit the preview
+  3. Drop the CMA worker keep-alive process, idle until the sandbox standbys, then hit the preview
      again and compare the server pid before and after resume.
 
 Env (same as run_session.py): ANTHROPIC_API_KEY, ANTHROPIC_ENVIRONMENT_ID,
 ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REGION].
 Run: python3 example/demo_preview_resume.py
 """
-import asyncio, json, os, re, time, urllib.request, urllib.error
+import asyncio, json, os, time, urllib.request, urllib.error
 from uuid import uuid4
 
+from local_worker import dispatch_until_session_work
+
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-WORKER_IMAGE = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest")
 PORT = 3000  # NOT 8080 -- that's the in-sandbox sandbox-api port.
 
 APP_CODE = (
@@ -55,8 +56,15 @@ def api(method, path, body=None):
         return e.code, {"_error": e.read().decode()[:300]}
 
 
+def require_api(method, path, body=None):
+    status, payload = api(method, path, body)
+    if not (200 <= status < 300):
+        raise SystemExit(f"{method} {path} failed ({status}): {json.dumps(payload)[:500]}")
+    return payload
+
+
 def events(sid):
-    return api("GET", f"/v1/sessions/{sid}/events")[1].get("data") or []
+    return require_api("GET", f"/v1/sessions/{sid}/events").get("data") or []
 
 
 def hit(url, timeout=30):
@@ -69,38 +77,22 @@ def hit(url, timeout=30):
 
 
 async def main():
-    from blaxel.core import SandboxInstance
-    for req in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_ENVIRONMENT_KEY", "ANTHROPIC_AGENT_ID"):
+    for req in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_ENVIRONMENT_KEY", "ANTHROPIC_AGENT_ID", "BL_API_KEY", "BL_WORKSPACE"):
         if not os.environ.get(req):
             raise SystemExit(f"missing required env: {req}")
 
-    _, sess = api("POST", "/v1/sessions",
-                  {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})
+    sess = require_api("POST", "/v1/sessions",
+                       {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})
     sid = sess.get("id")
     if not sid:
         raise SystemExit(f"session create failed: {sess}")
     print("session:", sid)
-    api("POST", f"/v1/sessions/{sid}/events",
-        {"events": [{"type": "user.message", "content": [{"type": "text", "text": MESSAGE}]}]})
+    require_api("POST", f"/v1/sessions/{sid}/events",
+                {"events": [{"type": "user.message", "content": [{"type": "text", "text": MESSAGE}]}]})
 
-    safe = re.sub(r"[^a-z0-9-]", "-", sid.lower())
-    spec = {"name": f"cma-worker-{safe[:40]}", "image": WORKER_IMAGE, "memory": 4096, "ttl": "2h",
-            "envs": [{"name": "ANTHROPIC_ENVIRONMENT_ID", "value": os.environ["ANTHROPIC_ENVIRONMENT_ID"]},
-                     {"name": "ANTHROPIC_ENVIRONMENT_KEY", "value": os.environ["ANTHROPIC_ENVIRONMENT_KEY"]}]}
-    if region := os.environ.get("BL_REGION"):
-        spec["region"] = region
-    worker = await SandboxInstance.create_if_not_exists(spec)
-    for i in range(20):
-        try:
-            await worker.process.exec({"name": f"probe{i}", "command": "node -v", "wait_for_completion": True}); break
-        except Exception:
-            await asyncio.sleep(2)
-    process_name = f"ant-poll-{uuid4().hex[:8]}"
-    await worker.process.exec({
-        "name": process_name, "command": "ant beta:worker poll --workdir /workspace --max-idle 120s",
-        "wait_for_completion": False, "keep_alive": True,
-        "timeout": int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))})
-    print(f"worker {spec['name']} polling as {process_name}")
+    dispatch = await dispatch_until_session_work(sid, label="preview-worker")
+    worker = dispatch.worker
+    print(f"worker {dispatch.sandbox_name} running claimed work {dispatch.work_id}")
 
     print("\n[1/3] waiting for the agent to author /workspace/app.py ...")
     deadline = time.monotonic() + 240
@@ -158,9 +150,9 @@ async def main():
 
     print("\n[3/3] resume-from-standby: release keep-alive, idle to force standby, hit again ...")
     try:
-        await worker.process.kill(process_name)
+        await worker.process.kill(dispatch.process_name)
     except Exception as e:
-        print("  (kill poll:", repr(e), ")")
+        print("  (kill worker:", repr(e), ")")
     idle_s = int(os.environ.get("DEMO_STANDBY_IDLE", "30"))
     print(f"  idling {idle_s}s with no connection so the sandbox snapshots to standby ...")
     await asyncio.sleep(idle_s)
@@ -176,7 +168,7 @@ async def main():
     print(f"  same server pid across standby/resume       : {pid_warm} == {pid_cold}")
     print(f"  resume round-trip after standby             : {ms2:.0f} ms incl. network")
     print(f"\n  Click it: {app_url}")
-    print(f"  Cleanup:  delete sandbox '{spec['name']}' when done.")
+    print(f"  Cleanup:  delete sandbox '{dispatch.sandbox_name}' when done.")
     print("=" * 64)
 
 
