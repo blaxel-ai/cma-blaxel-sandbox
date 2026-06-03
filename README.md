@@ -182,6 +182,8 @@ The repeating `t=...s` poll lines are expected while the worker cold-starts and 
 
 If you get this far, the agent session, environment key, worker image, Blaxel sandbox creation, exact work claiming, `ant beta:worker run`, file tool, bash tool, and result posting are working. The webhook is automation around the same exact-work dispatch path.
 
+Optional wow path: once the worker proof passes, run `python3 example/demo_preview_resume.py`. The agent authors a small web app in `/workspace`, the harness serves it on a public Blaxel preview URL, and the demo confirms the server survives sandbox standby and resume -- a reachable URL you can open in a browser.
+
 After a webhook or another worker has been registered for the same self-hosted environment, do not use `--local-worker` as an isolated proof unless that other claimant is stopped. A passing transcript only proves this Blaxel path when the matching `cma-worker-<session>` sandbox shows the expected `ant-run-*` process for the session's `work_...` item.
 
 ## Quickstart: Add The Webhook
@@ -269,7 +271,7 @@ Never put the org `ANTHROPIC_API_KEY` on the worker. The worker receives only th
 | Webhook returns 503 | Rerun `python3 setup.py` after exporting `ANTHROPIC_WEBHOOK_SIGNING_KEY`; if the key is present, inspect the event payload for a missing session id. Worker-start failures happen after the webhook 200 and show up in orchestrator logs. |
 | Webhook returns 401 | Confirm the `whsec_...` secret and that `anthropic[webhooks]` is installed in the orchestrator image. |
 | Later turns or reclaim retries do not start | Work process names must be derived from `work_...` ids and include a unique suffix. Completed process records persist. |
-| `run_session.py --local-worker` exits with `no claimed work appeared` | A previous worker sandbox (`cma-worker-*`) is still polling the shared queue and claimed the work first; `ant beta:worker run` keeps polling within `--max-idle`. Delete leftover `cma-worker-*` sandboxes (or let them idle out) before an isolated local-worker proof. |
+| `run_session.py --local-worker` exits with `no claimed work appeared` | Another active claimer took the work first: a webhook dispatcher, an always-on `ant beta:worker poll` worker, or a second `--local-worker` polling the same environment. A per-session `ant beta:worker run` worker does not re-claim new work -- it handles its one `work_...` item and exits -- so a leftover `cma-worker-*` only matters if it still holds a lease or trips the quiet-environment check. Stop the other claimant (or use a fresh environment), and clear leftover `cma-worker-*` sandboxes, before an isolated local-worker proof. |
 | Transcript passes but the matching Blaxel sandbox has no `ant-run-*` process | Another work claimant handled the item. Stop any other local worker, webhook dispatcher, or cookbook worker using the same self-hosted environment before using the run as proof of this path. |
 | Output files are missing | File tools write under `/workspace`; nothing is auto-exported. Bash can also write `/mnt/session/outputs`, but that path is not exposed to contained file tools without `--unrestricted-paths`. |
 
@@ -328,6 +330,7 @@ Real end-to-end checks create Anthropic sessions and Blaxel sandboxes:
 ```bash
 python3 example/run_session.py --local-worker
 python3 example/run_session.py
+python3 example/demo_preview_resume.py   # optional: agent builds + serves an app on a public preview URL
 ```
 
 ## Teardown
