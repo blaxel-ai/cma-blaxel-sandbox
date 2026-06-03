@@ -94,6 +94,8 @@ set -a; source .env; set +a
 
 This phase creates a self-hosted CMA environment, publishes the worker image, creates an agent, then runs one real session by claiming its work item locally and launching `ant beta:worker run` in the matching Blaxel worker sandbox.
 
+Prefer it hands-off? `python3 bootstrap.py` walks the whole flow for you: it reads `.env` directly (no re-`source` between steps), creates the environment and agent, publishes the images, runs the proof, and stops only at the two Anthropic Console actions below (generate the environment key, register the webhook). Run `python3 bootstrap.py --plan` to see the next step without doing anything. The numbered steps below are the same flow done by hand.
+
 ### 1. Check access
 
 ```bash

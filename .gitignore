@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+.env.bak
 .DS_Store
 .pytest_cache/
 .ruff_cache/
