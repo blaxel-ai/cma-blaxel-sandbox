@@ -93,7 +93,7 @@ Important boundaries:
 
 ## Run it locally before the webhook
 
-The fastest proof is the worker-only path. It uses real Anthropic sessions and real Blaxel sandboxes, but does not require webhook registration to validate the runtime first. Run it before webhook registration. After a webhook exists, use this mode carefully because it can race the webhook dispatcher to claim the same queued work.
+The fastest proof is the worker-only path. It uses real Anthropic sessions and real Blaxel sandboxes, but does not require webhook registration to validate the runtime first. Run it before webhook registration. After a webhook or another worker exists for the same self-hosted environment, use this mode only after stopping the other claimant. The first worker to claim queued work owns it, so a passing transcript is only proof of this Blaxel path when the matching `cma-worker-<session>` sandbox shows the expected `ant-run-*` process.
 
 1. Install local deps and load env. If following this file directly, first copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`, `BL_WORKSPACE`, and `BL_API_KEY`.
 
@@ -219,6 +219,7 @@ Common failures:
 | File tool rejects a path | Use `hello.txt`, not `/workspace/hello.txt`. |
 | Shell result is empty | Append output such as `&& echo ok`. |
 | Later turn or reclaim retry does not start | Use unique `ant-run-*` process names derived from the `work_...` id plus a suffix. Process records persist after completion. |
+| Transcript passes but no matching `ant-run-*` exists in the Blaxel worker sandbox | Another claimant handled the queued work. Stop any other local worker, webhook dispatcher, or cookbook worker using the same self-hosted environment before using the run as proof. |
 
 ## Why Blaxel Sandboxes
 
@@ -241,7 +242,8 @@ The included worker image is cloud-sandbox-compatible, not Anthropic-managed. It
 - The worker uses `--workdir /workspace` and does not use `--unrestricted-paths`.
 - `--max-idle` controls when `ant beta:worker run` exits after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is a cleanup backstop, not idle deletion, and should be longer than expected sessions.
-- Duplicate webhook deliveries are safe because dispatch waits briefly to collect near-simultaneous sessions, pre-readies known active session sandboxes before claiming, suppresses duplicate session schedules and currently in-flight work handoffs in-process, and relies on the SDK claim step for durable queue idempotency. If no work is found, another dispatcher may already have claimed it.
+- Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--local-worker`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue.
+- Duplicate webhook deliveries are safe because dispatch waits briefly to collect near-simultaneous sessions, pre-readies scheduled and still-queued session sandboxes before claiming, suppresses duplicate session schedules and currently in-flight work handoffs in-process, and relies on the SDK claim step for durable queue idempotency. If no work is found, another dispatcher may already have claimed it.
 - Sandbox names allow lowercase alphanumerics and hyphens. Anthropic session ids are sanitized before becoming worker names.
 - This sample passes a service-account `BL_API_KEY` to the orchestrator so it can create worker sandboxes.
 - Nothing is auto-exported from the worker. Read files back from `/workspace`, or expose an app through a preview URL.

@@ -344,12 +344,12 @@ async def test_dispatch_for_session_readies_worker_before_draining(monkeypatch):
         order.append(("drain", prepared_workers))
         return True
 
-    async def _active():
+    async def _queued():
         return set()
 
     monkeypatch.setattr(app, "_worker_ready_for_session", _ready)
     monkeypatch.setattr(app, "_drain_and_dispatch_work", _drain)
-    monkeypatch.setattr(app, "_active_work_session_ids", _active)
+    monkeypatch.setattr(app, "_queued_work_session_ids", _queued)
     monkeypatch.setattr(app, "dispatcher_debounce_ms", 0)
     app._scheduled_session_ids.add("sesn_x")
 
@@ -362,7 +362,7 @@ async def test_dispatch_for_session_readies_worker_before_draining(monkeypatch):
     assert "sesn_x" not in app._scheduled_session_ids
 
 
-async def test_dispatch_for_session_readies_all_known_sessions_before_draining(monkeypatch):
+async def test_dispatch_for_session_readies_scheduled_and_queued_sessions_before_draining(monkeypatch):
     order = []
     workers = {
         "sesn_a": object(),
@@ -374,8 +374,8 @@ async def test_dispatch_for_session_readies_all_known_sessions_before_draining(m
         order.append(("ready", session_id))
         return workers[session_id]
 
-    async def _active():
-        order.append(("list-active", None))
+    async def _queued():
+        order.append(("list-queued", None))
         return {"sesn_c"}
 
     async def _drain(*, prepared_workers=None):
@@ -383,14 +383,14 @@ async def test_dispatch_for_session_readies_all_known_sessions_before_draining(m
         return True
 
     monkeypatch.setattr(app, "_worker_ready_for_session", _ready)
-    monkeypatch.setattr(app, "_active_work_session_ids", _active)
+    monkeypatch.setattr(app, "_queued_work_session_ids", _queued)
     monkeypatch.setattr(app, "_drain_and_dispatch_work", _drain)
     monkeypatch.setattr(app, "dispatcher_debounce_ms", 0)
     app._scheduled_session_ids.update({"sesn_a", "sesn_b"})
 
     await app._dispatch_for_session("sesn_a")
 
-    assert order[:1] == [("list-active", None)]
+    assert order[:1] == [("list-queued", None)]
     assert set(order[1:4]) == {
         ("ready", "sesn_a"),
         ("ready", "sesn_b"),
@@ -399,6 +399,42 @@ async def test_dispatch_for_session_readies_all_known_sessions_before_draining(m
     assert order[4] == ("drain", workers)
     assert "sesn_a" not in app._scheduled_session_ids
     assert "sesn_b" in app._scheduled_session_ids
+
+
+async def test_queued_work_session_ids_ignores_stale_active_work(monkeypatch):
+    works = [
+        SimpleNamespace(
+            state="queued",
+            data=SimpleNamespace(type="session", id="sesn_queued"),
+        ),
+        SimpleNamespace(
+            state="active",
+            data=SimpleNamespace(type="session", id="sesn_stale_active"),
+        ),
+        SimpleNamespace(
+            state="stopped",
+            data=SimpleNamespace(type="session", id="sesn_stopped"),
+        ),
+        SimpleNamespace(
+            state="queued",
+            data=SimpleNamespace(type="memory", id="mem_1"),
+        ),
+    ]
+
+    async def _list(environment_id, limit):
+        assert environment_id == app.environment_id
+        assert limit == 50
+        return SimpleNamespace(data=works)
+
+    monkeypatch.setattr(app, "client", SimpleNamespace(
+        beta=SimpleNamespace(
+            environments=SimpleNamespace(
+                work=SimpleNamespace(list=_list)
+            )
+        )
+    ))
+
+    assert await app._queued_work_session_ids() == {"sesn_queued"}
 
 
 async def test_schedule_dispatch_suppresses_duplicate_session(monkeypatch):

@@ -8,7 +8,7 @@ Run Claude Managed Agents (CMA) tool execution on Blaxel sandboxes. Anthropic ho
 
 Two Blaxel sandbox roles:
 
-- `orchestrator/`: FastAPI webhook dispatcher on a public preview URL. On `session.status_run_started`, it verifies the webhook, schedules background dispatch, readies known active session worker sandboxes, claims queued work with the Anthropic SDK, and starts exact worker processes.
+- `orchestrator/`: FastAPI webhook dispatcher on a public preview URL. On `session.status_run_started`, it verifies the webhook, schedules background dispatch, readies scheduled and still-queued session worker sandboxes, claims queued work with the Anthropic SDK, and starts exact worker processes.
 - `worker/`: `ant beta:worker run` runtime. It receives `ANTHROPIC_WORK_ID` and `ANTHROPIC_SESSION_ID`, runs tools in `/workspace`, posts results back, heartbeats, and stops the claimed work item.
 
 Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summary: `llms.txt`.
@@ -82,6 +82,7 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 - `--max-idle` controls when `ant beta:worker run` exits after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is not idle deletion and should be longer than expected sessions.
 - Worker sandbox names must be lowercase alphanumerics and hyphens; sanitize Anthropic session ids.
+- Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--local-worker`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue; a transcript only proves this path when the matching Blaxel worker sandbox shows the expected `ant-run-*` process.
 - Duplicate webhook deliveries are safe because dispatch scheduling is suppressed per session in-process, currently-starting work handoffs are suppressed in-process, and SDK work claiming is durable; if no queued work remains, another dispatcher likely claimed it.
 
 ## Safe vs. company-facing

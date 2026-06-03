@@ -173,7 +173,7 @@ async def _worker_ready_for_session(session_id: str):
 
 
 async def _ready_workers_for_sessions(session_ids: set[str]) -> dict[str, object]:
-    """Ready all currently-known session sandboxes before the queue is claimed."""
+    """Ready currently-pending session sandboxes before the queue is claimed."""
     workers: dict[str, object] = {}
     if not session_ids:
         return workers
@@ -194,16 +194,16 @@ async def _ready_workers_for_sessions(session_ids: set[str]) -> dict[str, object
     return workers
 
 
-async def _active_work_session_ids() -> set[str]:
-    """Best-effort read-only look at active queue items before claiming them."""
+async def _queued_work_session_ids() -> set[str]:
+    """Best-effort read-only look at still-queued work before claiming it."""
     try:
         page = await client.beta.environments.work.list(environment_id, limit=50)
     except Exception as exc:
-        logger.warning("failed to list active work before claim: %r", exc)
+        logger.warning("failed to list queued work before claim: %r", exc)
         return set()
     session_ids: set[str] = set()
     for work in getattr(page, "data", None) or []:
-        if getattr(work, "state", None) == "stopped":
+        if getattr(work, "state", None) != "queued":
             continue
         if session_id := _work_session_id(work):
             session_ids.add(session_id)
@@ -343,7 +343,7 @@ async def _dispatch_for_session(session_id: str) -> None:
             await asyncio.sleep(dispatcher_debounce_ms / 1000)
         session_ids = set(_scheduled_session_ids)
         session_ids.add(session_id)
-        session_ids.update(await _active_work_session_ids())
+        session_ids.update(await _queued_work_session_ids())
         prepared_workers = await _ready_workers_for_sessions(session_ids)
         if session_id not in prepared_workers:
             raise RuntimeError(f"worker {_worker_name(session_id)} never became ready")
