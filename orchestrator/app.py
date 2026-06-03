@@ -5,11 +5,12 @@ This runs INSIDE a Blaxel sandbox, exposed on a public preview URL that is
 registered as the Anthropic webhook target.
 
 Design:
-  - On `session.status_run_started`, spawn ONE worker sandbox and return 200.
-  - The orchestrator never polls/claims/babysits the work queue.
-  - The worker self-claims by running `ant beta:worker poll` and exits after
-    queue idle; TTL is a max-age cleanup backstop. No orchestrator-side
-    supervision.
+  - On `session.status_run_started`, schedule dispatch and return 200 quickly.
+  - The background dispatcher readies the session sandbox before claiming work.
+  - For each claimed session work item, start one Blaxel worker sandbox process
+    bound to that exact work id and session id.
+  - The worker runs `ant beta:worker run`; it heartbeats and stops the claimed
+    work item itself. TTL is a max-age cleanup backstop.
 
 Running in a sandbox gives the webhook a public preview URL and lets the
 process resume with the sandbox on the next inbound webhook.
@@ -17,7 +18,6 @@ process resume with the sandbox on the next inbound webhook.
 import asyncio
 import os
 import re
-import time
 from contextlib import asynccontextmanager
 from logging import getLogger
 from uuid import uuid4
@@ -45,15 +45,26 @@ worker_image = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest"
 # backstop, not idle-based. For idle-based cleanup, use a `ttl-idle` lifecycle policy
 # instead (see Blaxel docs; not exposed in the installed SDK build).
 worker_ttl = os.environ.get("BLAXEL_WORKER_TTL", "2h")
-# Keep --max-idle generous enough to span the agent's reasoning between tool
-# calls; the worker exits once the queue is quiet for this long.
+# `ant beta:worker run --max-idle` stops after the session goes idle with
+# stop_reason=end_turn. 0 disables the timeout.
 worker_max_idle = os.environ.get("ANT_MAX_IDLE", "60s")
-# keep_alive holds the worker sandbox active while the poller runs. Without it the
-# sandbox standbys ~15s after spawn (the poller only makes outbound calls, so there
-# is no inbound connection to hold it active) and the poll loop freezes mid-session.
+# keep_alive holds the worker sandbox active while `ant run` serves the session.
+# Without it the sandbox can standby while the worker is making outbound calls.
 # Bounds a stuck session; set ANT_KEEPALIVE_TIMEOUT=0 to run until natural exit.
 worker_keepalive_timeout = int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))
 worker_region = os.environ.get("BL_REGION")
+dispatcher_poll_block_ms = int(os.environ.get("ANT_DISPATCHER_POLL_BLOCK_MS", "999"))
+dispatcher_reclaim_ms = int(os.environ.get("ANT_DISPATCHER_RECLAIM_MS", "30000"))
+dispatcher_debounce_ms = int(os.environ.get("ANT_DISPATCHER_DEBOUNCE_MS", "250"))
+worker_readiness_attempts = int(os.environ.get("BLAXEL_WORKER_READY_ATTEMPTS", "45"))
+worker_readiness_sleep = float(os.environ.get("BLAXEL_WORKER_READY_SLEEP", "2"))
+worker_run_attempts = int(os.environ.get("ANT_RUN_START_ATTEMPTS", "10"))
+
+_dispatcher_lock = asyncio.Lock()
+_background_tasks: set[asyncio.Task] = set()
+_scheduled_session_ids: set[str] = set()
+_worker_ready_tasks: dict[str, asyncio.Task] = {}
+_work_ids_in_flight: set[str] = set()
 
 
 def _worker_name(session_id: str) -> str:
@@ -67,6 +78,11 @@ def _worker_name(session_id: str) -> str:
     return f"cma-worker-{safe_id[:40]}"
 
 
+def _process_name(work_id: str) -> str:
+    safe_id = re.sub(r"[^a-z0-9-]", "-", work_id.lower())
+    return f"ant-run-{safe_id[:48]}"
+
+
 def _duration_to_seconds(value: str, default: int) -> int:
     match = re.fullmatch(r"\s*(\d+)\s*([smhdw]?)\s*", value.lower())
     if not match:
@@ -78,139 +94,286 @@ def _duration_to_seconds(value: str, default: int) -> int:
     return amount * multiplier
 
 
-# `session.status_run_started` can be delivered more than once (webhook retries)
-# and can also arrive while the previous poller is intentionally still alive for
-# --max-idle. Suppress duplicate starts for roughly that idle window. If a later
-# turn arrives after the previous poller idled out, a fresh process is started.
-worker_restart_cooldown = _duration_to_seconds(
-    os.environ.get("ANT_RESTART_COOLDOWN", worker_max_idle),
-    default=60,
-)
-_session_locks_guard = asyncio.Lock()
-_session_locks: dict[str, asyncio.Lock] = {}
-_session_last_started_at: dict[str, float] = {}
+def _work_session_id(work) -> str | None:
+    data = getattr(work, "data", None)
+    if getattr(data, "type", None) != "session":
+        return None
+    return getattr(data, "id", None)
 
 
-async def _lock_for_session(session_id: str) -> asyncio.Lock:
-    async with _session_locks_guard:
-        return _session_locks.setdefault(session_id, asyncio.Lock())
+async def _stop_work(work, *, force: bool = True) -> None:
+    try:
+        await client.beta.environments.work.stop(
+            work.id,
+            environment_id=work.environment_id,
+            force=force,
+        )
+    except Exception as exc:
+        logger.warning("failed to stop work %s: %r", getattr(work, "id", "?"), exc)
 
 
-def _prune_session_state(now: float) -> None:
-    # Bound memory in long-lived orchestrators. Keep state for several duplicate
-    # delivery windows but drop old, unlocked sessions.
-    max_age = max(worker_restart_cooldown * 4, 300)
-    for session_id, started_at in list(_session_last_started_at.items()):
-        if now - started_at <= max_age:
-            continue
-        lock = _session_locks.get(session_id)
-        if lock and lock.locked():
-            continue
-        _session_last_started_at.pop(session_id, None)
-        _session_locks.pop(session_id, None)
-
-
-async def _spawn_worker_once(session_id: str) -> bool:
-    lock = await _lock_for_session(session_id)
-    async with lock:
-        now = time.monotonic()
-        _prune_session_state(now)
-        if started_at := _session_last_started_at.get(session_id):
-            age = now - started_at
-            if age < worker_restart_cooldown:
-                logger.info(
-                    "worker start skipped for session %s; poller started %.1fs ago",
-                    session_id,
-                    age,
+async def _wait_for_worker_ready(worker, name: str) -> bool:
+    last_error = None
+    for attempt in range(worker_readiness_attempts):
+        try:
+            await worker.process.exec({
+                "name": f"probe-{uuid4().hex[:8]}",
+                "command": "node -v",
+                "wait_for_completion": True,
+            })
+            return True
+        except Exception as exc:
+            last_error = exc
+            if attempt in (0, 4, 14, worker_readiness_attempts - 1):
+                logger.warning(
+                    "worker %s readiness attempt %d failed: %r",
+                    name,
+                    attempt + 1,
+                    exc,
                 )
-                return True
-
-        started = await _spawn_worker(session_id)
-        if started:
-            _session_last_started_at[session_id] = time.monotonic()
-        return started
+            await asyncio.sleep(worker_readiness_sleep)
+    logger.error("worker %s never became ready: %r", name, last_error)
+    return False
 
 
-async def _spawn_worker(session_id: str) -> bool:
-    """Create (or revive) a self-claiming worker sandbox for a session.
-
-    The worker polls the environment queue itself, so the orchestrator never
-    touches the queue. The sandbox is named per session and the name is sanitized
-    (Blaxel names allow only lowercase alphanumerics + hyphens).
-
-    `session.status_run_started` fires once per run/turn, not once per session.
-    Keying the sandbox on the session id makes create idempotent across turns:
-    the first turn creates it; later turns reuse the same sandbox and just
-    (re)start the poller below, needed when the previous turn's poller already
-    exited on --max-idle. Overlapping pollers are harmless because the queue
-    hands each work item to a single claimer. The TTL (max-age from creation)
-    eventually removes the sandbox as a cleanup backstop, so there is no
-    orchestrator-side delete to babysit; keep it well above a session's length.
-    """
+async def _ensure_worker_ready(session_id: str):
     name = _worker_name(session_id)
-    envs = [
-        {"name": "ANTHROPIC_ENVIRONMENT_ID", "value": environment_id},
-        {"name": "ANTHROPIC_ENVIRONMENT_KEY", "value": environment_key},
-    ]
-    if base_url := os.environ.get("ANTHROPIC_BASE_URL"):
-        envs.append({"name": "ANTHROPIC_BASE_URL", "value": base_url})
-
     spec = {
         "name": name,
         "image": worker_image,
         "memory": 4096,
         "ttl": worker_ttl,        # max-age cleanup backstop: no orchestrator-side delete
-        "envs": envs,
     }
     if worker_region:
         spec["region"] = worker_region
-    worker = await SandboxInstance.create_if_not_exists(spec)
-    logger.info("worker %s created for session %s", name, session_id)
 
-    # Wait for the in-sandbox API to accept commands, then start the poller
-    # detached. `poll` self-claims the queued session, runs its tool calls,
-    # and shuts down after --max-idle. keep_alive holds the sandbox active for
-    # the whole session; without it the sandbox standbys ~15s after spawn and
-    # the poll loop freezes mid-session. We do NOT wait_for_completion and we do
-    # NOT delete; the worker owns its own lifecycle (the TTL handles max-age
-    # cleanup after sandbox creation).
-    #
-    # Give each poller launch a unique process name. Process records survive
-    # completion, so reusing `ant-poll` makes later turns or webhook retries fail
-    # with process-name conflicts even though starting a new poller is safe.
-    # `_spawn_worker_once` suppresses duplicate webhook deliveries during the
-    # max-idle window, while this unique name lets a later turn restart cleanly.
-    # Bounded so a cold spawn returns within Anthropic's webhook delivery timeout
-    # (calibrate during the validation run); on timeout the delivery is retried and
-    # create_if_not_exists is idempotent, so the retry finishes fast.
-    process_name = f"ant-poll-{uuid4().hex[:8]}"
-    for attempt in range(20):
+    worker = await SandboxInstance.create_if_not_exists(spec)
+    logger.info("worker %s readying for session %s", name, session_id)
+    if not await _wait_for_worker_ready(worker, name):
+        raise RuntimeError(f"worker {name} never became ready")
+    return worker
+
+
+async def _worker_ready_for_session(session_id: str):
+    task = _worker_ready_tasks.get(session_id)
+    if task is None:
+        task = asyncio.create_task(
+            _ensure_worker_ready(session_id),
+            name=f"ready-{_worker_name(session_id)}",
+        )
+        _worker_ready_tasks[session_id] = task
+
+        def _clear_ready_task(done: asyncio.Task, sid: str = session_id) -> None:
+            if _worker_ready_tasks.get(sid) is done:
+                _worker_ready_tasks.pop(sid, None)
+
+        task.add_done_callback(_clear_ready_task)
+    return await task
+
+
+async def _ready_workers_for_sessions(session_ids: set[str]) -> dict[str, object]:
+    """Ready all currently-known session sandboxes before the queue is claimed."""
+    workers: dict[str, object] = {}
+    if not session_ids:
+        return workers
+    ordered = sorted(session_ids)
+    results = await asyncio.gather(
+        *(_worker_ready_for_session(session_id) for session_id in ordered),
+        return_exceptions=True,
+    )
+    for session_id, result in zip(ordered, results):
+        if isinstance(result, Exception):
+            logger.error(
+                "failed to ready worker sandbox %s before claim: %r",
+                _worker_name(session_id),
+                result,
+            )
+            continue
+        workers[session_id] = result
+    return workers
+
+
+async def _active_work_session_ids() -> set[str]:
+    """Best-effort read-only look at active queue items before claiming them."""
+    try:
+        page = await client.beta.environments.work.list(environment_id, limit=50)
+    except Exception as exc:
+        logger.warning("failed to list active work before claim: %r", exc)
+        return set()
+    session_ids: set[str] = set()
+    for work in getattr(page, "data", None) or []:
+        if getattr(work, "state", None) == "stopped":
+            continue
+        if session_id := _work_session_id(work):
+            session_ids.add(session_id)
+    return session_ids
+
+
+def _mark_work_in_flight(work_id: str) -> bool:
+    if work_id in _work_ids_in_flight:
+        return False
+    _work_ids_in_flight.add(work_id)
+    return True
+
+
+async def _dispatch_work_item(work, *, prepared_worker=None) -> bool:
+    """Launch one Blaxel worker process for one already-claimed CMA work item."""
+    session_id = _work_session_id(work)
+    if not session_id:
+        logger.warning(
+            "unsupported work %s type %s; force-stopping",
+            getattr(work, "id", "?"),
+            getattr(getattr(work, "data", None), "type", None),
+        )
+        await _stop_work(work, force=True)
+        return True
+
+    if not _mark_work_in_flight(work.id):
+        logger.info("work %s is already dispatching; suppressing duplicate claim", work.id)
+        return True
+
+    try:
+        worker = prepared_worker or await _worker_ready_for_session(session_id)
+    except Exception as exc:
+        logger.error(
+            "failed to ready worker sandbox %s for work %s: %r",
+            _worker_name(session_id),
+            work.id,
+            exc,
+        )
+        _work_ids_in_flight.discard(work.id)
+        await _stop_work(work, force=True)
+        return False
+
+    name = _worker_name(session_id)
+    process_name = _process_name(work.id)
+    process_env = {
+        "ANTHROPIC_WORK_ID": work.id,
+        "ANTHROPIC_SESSION_ID": session_id,
+        "ANTHROPIC_ENVIRONMENT_ID": getattr(work, "environment_id", environment_id),
+        "ANTHROPIC_ENVIRONMENT_KEY": environment_key,
+    }
+    if base_url := os.environ.get("ANTHROPIC_BASE_URL"):
+        process_env["ANTHROPIC_BASE_URL"] = base_url
+
+    # Do not heartbeat here. `ant beta:worker run` owns the first heartbeat for
+    # the claimed item; a dispatcher-side heartbeat would change the expected
+    # lease token and can make the stock worker lose the handoff. Keep this gap
+    # short by readying the sandbox before the SDK claim and bounding retries.
+    for attempt in range(worker_run_attempts):
         try:
             await worker.process.exec({
                 "name": process_name,
-                "command": f"ant beta:worker poll --workdir /workspace --max-idle {worker_max_idle}",
+                "command": f"ant beta:worker run --workdir /workspace --max-idle {worker_max_idle}",
                 "wait_for_completion": False,
                 "keep_alive": True,
                 "timeout": worker_keepalive_timeout,
+                "env": process_env,
             })
             logger.info(
-                "worker %s polling as %s (session %s)",
+                "worker %s running %s for session %s",
                 name,
                 process_name,
                 session_id,
             )
             return True
         except Exception as exc:
-            if attempt in (0, 4, 9, 19):
+            if attempt in (0, 4, 9, worker_run_attempts - 1):
                 logger.warning(
-                    "worker %s poll start attempt %d failed: %r",
+                    "worker %s ant run start attempt %d failed: %r",
                     name,
                     attempt + 1,
                     exc,
                 )
             await asyncio.sleep(2)
-    logger.error("worker %s never accepted poll command %s", name, process_name)
+    logger.error("worker %s never accepted ant run command %s", name, process_name)
+    _work_ids_in_flight.discard(work.id)
+    await _stop_work(work, force=True)
     return False
+
+
+async def _drain_and_dispatch_work(*, prepared_workers: dict[str, object] | None = None) -> bool:
+    """Claim currently queued work and hand each item to its session sandbox."""
+    prepared_workers = prepared_workers or {}
+    async with _dispatcher_lock:
+        dispatched = 0
+        failed = 0
+        try:
+            async for work in client.beta.environments.work.poller(
+                environment_id=environment_id,
+                environment_key=environment_key,
+                worker_id=f"cma-orchestrator-{uuid4().hex[:8]}",
+                block_ms=dispatcher_poll_block_ms,
+                reclaim_older_than_ms=dispatcher_reclaim_ms,
+                drain=True,
+                auto_stop=False,
+            ):
+                dispatched += 1
+                session_id = _work_session_id(work)
+                prepared_worker = prepared_workers.get(session_id) if session_id else None
+                if session_id and prepared_worker is None:
+                    logger.warning(
+                        "claimed work %s for session %s without a pre-readied sandbox; "
+                        "webhook delivery may have arrived after this drain started",
+                        work.id,
+                        session_id,
+                    )
+                if not await _dispatch_work_item(work, prepared_worker=prepared_worker):
+                    failed += 1
+        except Exception as exc:
+            logger.error("dispatcher failed while claiming work: %r", exc)
+            return False
+        if dispatched == 0:
+            logger.info("dispatcher found no queued work; another worker may have claimed it")
+            return True
+        logger.info("dispatcher handled %d work item(s), failures=%d", dispatched, failed)
+        return failed == 0
+
+
+async def _dispatch_for_session(session_id: str) -> None:
+    """Prepare the session sandbox before claiming work, then drain quickly."""
+    try:
+        if dispatcher_debounce_ms > 0:
+            await asyncio.sleep(dispatcher_debounce_ms / 1000)
+        session_ids = set(_scheduled_session_ids)
+        session_ids.add(session_id)
+        session_ids.update(await _active_work_session_ids())
+        prepared_workers = await _ready_workers_for_sessions(session_ids)
+        if session_id not in prepared_workers:
+            raise RuntimeError(f"worker {_worker_name(session_id)} never became ready")
+        ok = await _drain_and_dispatch_work(prepared_workers=prepared_workers)
+        if not ok:
+            logger.error("background dispatch for session %s had failures", session_id)
+    except Exception as exc:
+        logger.error("background dispatch for session %s failed before claim: %r", session_id, exc)
+    finally:
+        _scheduled_session_ids.discard(session_id)
+
+
+def _track_background_task(task: asyncio.Task) -> None:
+    _background_tasks.add(task)
+
+    def _done(done: asyncio.Task) -> None:
+        _background_tasks.discard(done)
+        try:
+            done.result()
+        except Exception as exc:
+            logger.error("background dispatch task crashed: %r", exc)
+
+    task.add_done_callback(_done)
+
+
+def _schedule_dispatch_for_session(session_id: str) -> bool:
+    if session_id in _scheduled_session_ids:
+        logger.info("dispatch for session %s is already scheduled", session_id)
+        return False
+    _scheduled_session_ids.add(session_id)
+    task = asyncio.create_task(
+        _dispatch_for_session(session_id),
+        name=f"dispatch-{_worker_name(session_id)}",
+    )
+    _track_background_task(task)
+    return True
 
 
 @asynccontextmanager
@@ -237,19 +400,10 @@ async def webhook(request: Request):
         return JSONResponse({"error": "signature verification failed"}, status_code=401)
 
     if event.data.type == "session.status_run_started":
-        # event.data.id is the id of the resource that triggered the event, the
-        # session. The worker self-claims, so this is only used to name the
-        # sandbox; the uuid fallback is defensive and normally unused.
-        session_id = getattr(event.data, "id", None) or f"sesn-{uuid4().hex[:12]}"
-        # Spawn synchronously. Holding the inbound webhook connection open for the
-        # spawn keeps THIS orchestrator sandbox active, so it can't standby (and
-        # freeze) mid-spawn. Once started, the worker holds itself alive via process
-        # keep_alive, so the orchestrator can safely standby after we return. If a
-        # cold spawn exceeds Anthropic's webhook delivery timeout, the delivery is
-        # retried and create_if_not_exists is idempotent; _spawn_worker_once also
-        # collapses duplicate deliveries while the previous poller is still alive.
-        if not await _spawn_worker_once(session_id):
-            return JSONResponse({"error": "worker poller did not start"}, status_code=503)
+        session_id = getattr(event.data, "id", None)
+        if not session_id:
+            return JSONResponse({"error": "session id missing from webhook event"}, status_code=503)
+        _schedule_dispatch_for_session(session_id)
 
     return {"status": "ok"}
 

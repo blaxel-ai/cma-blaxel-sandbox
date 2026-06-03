@@ -23,6 +23,6 @@ wait_for_port() {
 
 wait_for_port 8080
 
-# The orchestrator starts `ant beta:worker poll` via the sandbox process API
-# once the sandbox is up, so we just keep sandbox-api alive here.
+# The orchestrator starts `ant beta:worker run` via the sandbox process API for
+# each claimed work item, so we just keep sandbox-api alive here.
 wait

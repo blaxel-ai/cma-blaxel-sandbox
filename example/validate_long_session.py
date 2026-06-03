@@ -2,7 +2,7 @@
 """Long-conversation validation for the CMA-on-Blaxel cookbook.
 
 Purpose: prove the keep-alive fix. A Blaxel sandbox standbys ~15s after its last
-inbound connection; the worker poller only makes outbound calls, so without
+inbound connection; the CMA worker only makes outbound calls, so without
 process keep-alive the worker freezes mid-session. This script forces a session
 whose work lasts WELL past that 15s window (three 30s sleeps + reads = ~90s+ of
 sustained tool execution in one turn) and checks it actually completes.
@@ -12,8 +12,8 @@ It also probes the security fix: it asks the agent to use its *write file tool*
 (expected, since the worker now runs without --unrestricted-paths).
 
 Runs WITHOUT the Anthropic webhook by default (--local-worker spawns the worker
-directly). Drop --local-worker once the webhook is registered to exercise the
-orchestrator's synchronous-spawn path end to end instead.
+directly after claiming its exact work item). Drop --local-worker once the
+webhook is registered to exercise the orchestrator path end to end instead.
 
 Set the same env as run_session.py first (ANTHROPIC_API_KEY, ANTHROPIC_ENVIRONMENT_ID,
 ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REGION]):
@@ -21,13 +21,11 @@ ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REG
     python3 example/validate_long_session.py                     # local-worker (no webhook)
     python3 example/validate_long_session.py --no-local-worker   # rely on webhook + orchestrator
 """
-import argparse, asyncio, json, os, re, time, urllib.request, urllib.error
-from uuid import uuid4
+import argparse, asyncio, json, os, time, urllib.request, urllib.error
+
+from local_worker import dispatch_until_session_work
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-WORKER_IMAGE = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest")
-WORKER_MAX_IDLE = os.environ.get("ANT_MAX_IDLE", "60s")
-KEEPALIVE_TIMEOUT = int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))
 
 # One turn that forces ~90s+ of sustained work across several tool calls, plus a
 # containment probe. The long sleeps are what would trip the 15s standby freeze.
@@ -64,46 +62,20 @@ def api(method, path, body=None):
         return e.code, {"_error": e.read().decode()[:300]}
 
 
+def require_api(method, path, body=None):
+    status, payload = api(method, path, body)
+    if not (200 <= status < 300):
+        raise SystemExit(f"{method} {path} failed ({status}): {json.dumps(payload)[:500]}")
+    return payload
+
+
 def events(sid):
-    return api("GET", f"/v1/sessions/{sid}/events")[1].get("data") or []
+    return require_api("GET", f"/v1/sessions/{sid}/events").get("data") or []
 
 
 def queue_pending():
-    _, d = api("GET", f"/v1/environments/{os.environ['ANTHROPIC_ENVIRONMENT_ID']}/work/stats")
+    d = require_api("GET", f"/v1/environments/{os.environ['ANTHROPIC_ENVIRONMENT_ID']}/work/stats")
     return (d.get("depth") or 0) + (d.get("pending") or 0)
-
-
-async def spawn_local_worker(session_id):
-    from blaxel.core import SandboxInstance
-    safe_id = re.sub(r"[^a-z0-9-]", "-", session_id.lower())
-    spec = {
-        "name": f"cma-worker-{safe_id[:40]}",
-        "image": WORKER_IMAGE,
-        "memory": 4096,
-        "ttl": "2h",  # max-age cleanup backstop (units m/h/d/w, not seconds)
-        "envs": [{"name": "ANTHROPIC_ENVIRONMENT_ID", "value": os.environ["ANTHROPIC_ENVIRONMENT_ID"]},
-                 {"name": "ANTHROPIC_ENVIRONMENT_KEY", "value": os.environ["ANTHROPIC_ENVIRONMENT_KEY"]}],
-    }
-    if region := os.environ.get("BL_REGION"):
-        spec["region"] = region
-    worker = await SandboxInstance.create_if_not_exists(spec)
-    for i in range(20):
-        try:
-            await worker.process.exec({"name": f"probe-{uuid4().hex[:8]}", "command": "node -v", "wait_for_completion": True})
-            break
-        except Exception:
-            await asyncio.sleep(2)
-    # FIXED launch: no --unrestricted-paths (contained to /workspace) + keep_alive
-    # so the sandbox stays active for the whole multi-minute turn.
-    process_name = f"ant-poll-{uuid4().hex[:8]}"
-    await worker.process.exec({
-        "name": process_name,
-        "command": f"ant beta:worker poll --workdir /workspace --max-idle {WORKER_MAX_IDLE}",
-        "wait_for_completion": False,
-        "keep_alive": True,
-        "timeout": KEEPALIVE_TIMEOUT,
-    })
-    print(f"[local-worker] {spec['name']} polling as {process_name} (keep_alive=True, no --unrestricted-paths)")
 
 
 async def main():
@@ -124,18 +96,18 @@ async def main():
             if not os.environ.get(req):
                 raise SystemExit(f"missing required env: {req}")
 
-    _, sess = api("POST", "/v1/sessions",
-                  {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})
+    sess = require_api("POST", "/v1/sessions",
+                       {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})
     sid = sess.get("id")
     if not sid:
         raise SystemExit(f"session create failed: {sess}")
     print("session:", sid)
-    api("POST", f"/v1/sessions/{sid}/events",
-        {"events": [{"type": "user.message", "content": [{"type": "text", "text": args.message}]}]})
+    require_api("POST", f"/v1/sessions/{sid}/events",
+                {"events": [{"type": "user.message", "content": [{"type": "text", "text": args.message}]}]})
     print("message sent; expecting ~90s+ of sustained work\n")
 
     if args.local_worker:
-        await spawn_local_worker(sid)
+        await dispatch_until_session_work(sid, label="long-session-worker")
 
     t0 = time.monotonic()
     deadline = t0 + args.max_min * 60
@@ -146,7 +118,7 @@ async def main():
     final_msg = ""
     froze = False
     while time.monotonic() < deadline:
-        _, s = api("GET", f"/v1/sessions/{sid}")
+        s = require_api("GET", f"/v1/sessions/{sid}")
         st = s.get("status")
         items = events(sid)
         n = len(items)
@@ -169,7 +141,7 @@ async def main():
         if started and idle >= 150:
             froze = True
             print("\nFAIL: no session progress for 150s -- stalled worker (standby-freeze, a "
-                  "4xx on tool-result post, or worker exit). Check the worker's ant-poll logs.")
+                  "4xx on tool-result post, or worker exit). Check the worker's ant-run logs.")
             break
         await asyncio.sleep(5)
 
@@ -198,6 +170,8 @@ async def main():
           "tool write to /tmp should be REFUSED (no --unrestricted-paths). bash writes "
           "outside /workspace are NOT restricted by this flag; only the file tools are.")
     print("=" * 60)
+    if not ok or froze:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

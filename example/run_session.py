@@ -5,7 +5,7 @@ Normal flow (webhook wired): create a session + send a message; the orchestrator
 receives the `session.status_run_started` webhook and spawns a worker automatically.
 
 For testing WITHOUT a webhook, pass --local-worker to spawn the worker directly
-from here (handy for validating the worker before wiring the Anthropic webhook).
+from here after claiming its exact work item with the SDK.
 
 Set these in your shell first:
     ANTHROPIC_API_KEY          your Anthropic API key (control-plane calls)
@@ -16,12 +16,11 @@ For --local-worker, also:
     BL_API_KEY, BL_WORKSPACE   so the Blaxel SDK can spawn the worker sandbox
     BL_REGION                  optional, e.g. us-pdx-1
 """
-import argparse, asyncio, json, os, re, urllib.request, urllib.error
-from uuid import uuid4
+import argparse, asyncio, json, os, urllib.request, urllib.error
+
+from local_worker import dispatch_until_session_work
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-WORKER_IMAGE = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest")
-WORKER_MAX_IDLE = os.environ.get("ANT_MAX_IDLE", "60s")
 
 
 def _headers():
@@ -43,51 +42,29 @@ def api(method, path, body=None):
         return e.code, {"_error": e.read().decode()[:300]}
 
 
+def require_api(method, path, body=None):
+    status, payload = api(method, path, body)
+    if not (200 <= status < 300):
+        raise SystemExit(f"{method} {path} failed ({status}): {json.dumps(payload)[:500]}")
+    return payload
+
+
 def events(sid):
-    return api("GET", f"/v1/sessions/{sid}/events")[1].get("data") or []
+    return require_api("GET", f"/v1/sessions/{sid}/events").get("data") or []
 
 
 def queue_pending():
     """depth + pending in the environment's work queue (0 == nothing waiting)."""
-    _, d = api("GET", f"/v1/environments/{os.environ['ANTHROPIC_ENVIRONMENT_ID']}/work/stats")
+    d = require_api("GET", f"/v1/environments/{os.environ['ANTHROPIC_ENVIRONMENT_ID']}/work/stats")
     return (d.get("depth") or 0) + (d.get("pending") or 0)
 
 
-async def spawn_local_worker(session_id):
-    from blaxel.core import SandboxInstance
-    # Blaxel sandbox names allow only lowercase alphanumerics + hyphens.
-    # Session ids look like `sesn_01AbC...`; sanitize with the same regex as
-    # _worker_name() in orchestrator/app.py.
-    safe_id = re.sub(r"[^a-z0-9-]", "-", session_id.lower())
-    spec = {
-        "name": f"cma-worker-{safe_id[:40]}",
-        "image": WORKER_IMAGE,
-        "memory": 4096,
-        "ttl": "2h",  # max-age cleanup backstop (units m/h/d/w, not seconds)
-        "envs": [{"name": "ANTHROPIC_ENVIRONMENT_ID", "value": os.environ["ANTHROPIC_ENVIRONMENT_ID"]},
-                 {"name": "ANTHROPIC_ENVIRONMENT_KEY", "value": os.environ["ANTHROPIC_ENVIRONMENT_KEY"]}],
-    }
-    if region := os.environ.get("BL_REGION"):
-        spec["region"] = region
-    worker = await SandboxInstance.create_if_not_exists(spec)
-    # Wait for the in-sandbox API to accept commands (a fresh sandbox is cold).
-    for i in range(45):
-        try:
-            await worker.process.exec({"name": f"probe-{uuid4().hex[:8]}", "command": "node -v", "wait_for_completion": True})
-            break
-        except Exception:
-            await asyncio.sleep(2)
-    process_name = f"ant-poll-{uuid4().hex[:8]}"
-    await worker.process.exec({
-        "name": process_name,
-        "command": f"ant beta:worker poll --workdir /workspace --max-idle {WORKER_MAX_IDLE}",
-        "wait_for_completion": False,
-        # keep_alive holds the sandbox active for the whole session; without it the
-        # worker standbys ~15s after spawn and the poll loop freezes mid-session.
-        "keep_alive": True,
-        "timeout": int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600")),
-    })
-    print(f"[local-worker] {spec['name']} is polling the queue as {process_name}")
+def has_end_turn(items):
+    for event in items:
+        stop_reason = event.get("stop_reason") or {}
+        if event.get("type") == "session.status_idle" and stop_reason.get("type") == "end_turn":
+            return True
+    return False
 
 
 async def main():
@@ -108,18 +85,18 @@ async def main():
             if not os.environ.get(_req):
                 raise SystemExit(f"missing required env: {_req}")
 
-    _, sess = api("POST", "/v1/sessions",
-                  {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})
+    sess = require_api("POST", "/v1/sessions",
+                       {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})
     sid = sess.get("id")
     if not sid:
         raise SystemExit(f"session create failed: {sess}")
     print("session:", sid)
-    api("POST", f"/v1/sessions/{sid}/events",
-        {"events": [{"type": "user.message", "content": [{"type": "text", "text": args.message}]}]})
+    require_api("POST", f"/v1/sessions/{sid}/events",
+                {"events": [{"type": "user.message", "content": [{"type": "text", "text": args.message}]}]})
     print("message sent")
 
     if args.local_worker:
-        await spawn_local_worker(sid)
+        await dispatch_until_session_work(sid)
 
     # A CMA session reports status "idle" even while a turn is mid-flight, so we
     # can't watch status alone. Watch the work queue + transcript: the turn is done
@@ -128,31 +105,54 @@ async def main():
     # also keeps us from declaring "done" before a cold worker even claims.
     started = False; prev = -1; stable = 0
     for i in range(72):  # up to ~6 min
-        _, s = api("GET", f"/v1/sessions/{sid}")
+        s = require_api("GET", f"/v1/sessions/{sid}")
         st = s.get("status")
         items = events(sid)
         n = len(items)
         pending = queue_pending()
-        if pending > 0 or any(e.get("type") in ("user.tool_result", "agent.tool_result") for e in items):
+        if pending > 0 or any(e.get("type") in ("agent.tool_use", "user.tool_result", "agent.tool_result") for e in items):
             started = True
         stable = stable + 1 if n == prev else 0
         prev = n
         print(f"  t={i*5:3d}s status={st} events={n} queue={pending}")
         if st == "terminated":
             break
-        if started and pending == 0 and stable >= 3:  # worked, drained, and quiet
+        if started and pending == 0 and has_end_turn(items) and stable >= 1:
             break
         await asyncio.sleep(5)
 
     items = events(sid)
+    tool_errors = []
+    has_write = False
+    has_bash = False
     for e in items:
         if e.get("type") == "agent.tool_use":
             print("  tool:", e.get("name"), json.dumps(e.get("input"))[:80])
+            payload = json.dumps(e.get("input"))
+            has_write = has_write or (e.get("name") == "write" and "hello.txt" in payload)
+            has_bash = has_bash or (e.get("name") == "bash" and "/workspace/hello.txt" in payload)
         if e.get("type") in ("user.tool_result", "agent.tool_result") and e.get("is_error"):
             print("  ERROR:", json.dumps(e.get("content"))[:140])
+            tool_errors.append(e)
     msgs = [e for e in items if e.get("type") == "agent.message"]
+    final = json.dumps(msgs[-1].get("content")) if msgs else ""
     if msgs:
-        print("\nfinal agent message:", json.dumps(msgs[-1].get("content"))[:400])
+        print("\nfinal agent message:", final[:400])
+
+    ok = (
+        started
+        and not tool_errors
+        and has_write
+        and has_bash
+        and "hello from blaxel" in final.lower()
+    )
+    if not ok:
+        raise SystemExit(
+            "EXAMPLE: FAIL "
+            f"(started={started}, write={has_write}, bash={has_bash}, "
+            f"errors={len(tool_errors)}, final_contains_hello={'hello from blaxel' in final.lower()})"
+        )
+    print("\nEXAMPLE: PASS")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,14 @@
-"""Tests for setup.py's in-place webhook-server restart (the P0-1 re-run fix).
+"""Tests for setup.py's in-place orchestrator update + restart path.
 
 The bug it locks: re-running setup after adding ANTHROPIC_WEBHOOK_SIGNING_KEY
 left the old server running with stale config (and create_if_not_exists doesn't
-update the sandbox env), so deliveries kept being rejected with 503. The fix
-kills the old server and starts a fresh one with the current env passed at the
-process level, without recreating the sandbox (so the preview URL is stable).
+update existing sandbox runtime config), so deliveries kept being rejected with
+503 or the sandbox could stay on an older image. The fix updates the sandbox
+spec, kills the old server, and starts a fresh one with the current env passed
+at the process level while preserving the stable preview URL.
 """
+import pytest
+
 import setup
 
 
@@ -37,6 +40,71 @@ class _FakeSandbox:
         self.process = _FakeProcessAPI(existing)
 
 
+def test_orchestrator_sandbox_body_includes_runtime_config(monkeypatch):
+    monkeypatch.setattr(setup, "NAME", "cma-orchestrator-test")
+    monkeypatch.setattr(setup, "IMAGE", "sandbox/cma-orchestrator:test")
+    monkeypatch.setattr(setup, "ORCHESTRATOR_TTL", "3d")
+    monkeypatch.setenv("BL_REGION", "us-pdx-1")
+    envs = [{"name": "BL_WORKSPACE", "value": "main"}]
+
+    body = setup._orchestrator_sandbox_body(envs)
+
+    assert body["metadata"]["name"] == "cma-orchestrator-test"
+    assert body["spec"]["region"] == "us-pdx-1"
+    runtime = body["spec"]["runtime"]
+    assert runtime["image"] == "sandbox/cma-orchestrator:test"
+    assert runtime["ttl"] == "3d"
+    assert runtime["memory"] == 2048
+    assert runtime["envs"] == envs
+    assert runtime["ports"] == [
+        {"name": "sandbox-api", "target": 8080, "protocol": "HTTP"},
+        {"name": "webhook", "target": setup.PORT, "protocol": "HTTP"},
+    ]
+
+
+async def test_upsert_creates_then_updates_existing_sandbox(monkeypatch):
+    calls = []
+    fake_client = object()
+    updated_model = object()
+
+    class _FakeSandboxInstance:
+        @classmethod
+        async def create_if_not_exists(cls, body):
+            calls.append(("create", body))
+
+        def __init__(self, model=None):
+            self.model = model
+
+    async def _fake_update_sandbox(name, *, client, body):
+        calls.append(("update", name, client, body))
+        return updated_model
+
+    monkeypatch.setattr(setup, "SandboxInstance", _FakeSandboxInstance)
+    monkeypatch.setattr(setup, "update_sandbox", _fake_update_sandbox)
+    monkeypatch.setattr(setup, "blaxel_client", fake_client)
+
+    body = {"metadata": {"name": "cma-orchestrator-app"}, "spec": {}}
+    result = await setup._upsert_orchestrator_sandbox(body)
+
+    assert calls == [
+        ("create", body),
+        ("update", setup.NAME, fake_client, body),
+    ]
+    assert result.model is updated_model
+
+
+def test_upsert_rejects_empty_or_error_update_response():
+    class Error:
+        code = "bad_request"
+        message = "bad image"
+        status_code = 400
+
+    with pytest.raises(RuntimeError, match="empty response"):
+        setup._raise_if_resource_error(None)
+    with pytest.raises(RuntimeError, match="bad image"):
+        setup._raise_if_resource_error(Error())
+
+
 def test_is_webhook_server_process_matches_name_and_command():
     assert setup._is_webhook_server_process("webhook-server-abc123", "")
     assert setup._is_webhook_server_process("anything", "python3 -m uvicorn app:app")
@@ -49,6 +117,7 @@ async def test_restart_kills_stale_server_and_passes_current_env(monkeypatch):
     async def _no_sleep(_):
         return None
     monkeypatch.setattr(setup.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(setup, "ORCHESTRATOR_KEEPALIVE_TIMEOUT", 123)
 
     existing = [
         _FakeProc(name="webhook-server-old1", command="python3 -m uvicorn app:app"),
@@ -75,6 +144,8 @@ async def test_restart_kills_stale_server_and_passes_current_env(monkeypatch):
     assert spec["env"] == env_map
     assert spec["env"]["ANTHROPIC_WEBHOOK_SIGNING_KEY"] == "whsec_x"
     assert spec["wait_for_completion"] is False
+    assert spec["keep_alive"] is True
+    assert spec["timeout"] == 123
     assert "uvicorn app:app" in spec["command"]
 
 

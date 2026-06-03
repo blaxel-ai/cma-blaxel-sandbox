@@ -1,33 +1,36 @@
 # Claude Managed Agents on Blaxel (self-hosted sandbox cookbook)
 
-> Anthropic hosts the CMA agent loop and environment work queue. Blaxel sandboxes run the self-hosted tool execution. This repo uses an orchestrator sandbox for the webhook control plane and one worker sandbox per session for the compute plane. AI agents should read AGENTS.md first.
+> Anthropic hosts the CMA agent loop and environment work queue. Blaxel sandboxes run self-hosted tool execution. This repo uses an orchestrator sandbox for the webhook dispatcher and one worker sandbox per session. AI agents should read AGENTS.md first.
 
 ## Core concepts
 
-- CMA: Anthropic runs Claude, session state, event history, skills, and tool selection.
+- CMA: Anthropic runs Claude, session state, event history, configured skills, and tool selection.
 - Self-hosted execution: tool runtime, filesystem, processes, and network boundary live in the user's infrastructure.
-- Blaxel orchestrator: FastAPI webhook on a public preview URL; verifies `session.status_run_started` and starts a worker.
-- Blaxel worker: `ant beta:worker poll`; claims the session work, runs tools in `/workspace`, posts results, and exits after `--max-idle`.
+- Blaxel orchestrator: FastAPI webhook on a public preview URL; verifies `session.status_run_started`, schedules background dispatch, readies known active session sandboxes, claims queued work with the Anthropic SDK, and starts worker processes.
+- Blaxel worker: `ant beta:worker run`; receives `ANTHROPIC_WORK_ID` and `ANTHROPIC_SESSION_ID`, runs tools in `/workspace`, heartbeats, posts results, and stops the claimed work.
 - Worker image: self-hosted Docker image with `sandbox-api`, `ant`, and the language runtimes, package managers, database clients, and utilities from Anthropic's cloud sandbox reference. It smokes documented runtime floors, but it is not Anthropic's managed Ubuntu image.
 
 ## Credentials
 
 - `ANTHROPIC_API_KEY`: local control-plane key. Creates environments, agents, sessions, and reads events. Never put it on the worker.
-- `ANTHROPIC_ENVIRONMENT_KEY`: scoped, revocable environment key. The worker uses it to poll the queue. Agent-run shell can read worker env vars.
+- `ANTHROPIC_ENVIRONMENT_KEY`: scoped, revocable environment key. The orchestrator uses it to claim work; the worker process uses it to serve one claimed session. Agent-run shell can read worker env vars.
 - `ANTHROPIC_WEBHOOK_SIGNING_KEY`: `whsec_...` secret used by the orchestrator to verify Anthropic webhooks.
 - `BL_API_KEY` and `BL_WORKSPACE`: Blaxel service-account auth for the orchestrator to spawn workers.
 
 ## Canonical flow
 
-1. `python3 scripts/preflight.py`
-2. `python3 scripts/create_environment.py` -> `ANTHROPIC_ENVIRONMENT_ID`
-3. Generate `ANTHROPIC_ENVIRONMENT_KEY` in the Anthropic Console.
-4. `(cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox)`
-5. `python3 scripts/create_agent.py` -> `ANTHROPIC_AGENT_ID`
-6. `python3 example/run_session.py --local-worker`
-7. `(cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox)`
-8. `python3 setup.py`, register webhook, export `ANTHROPIC_WEBHOOK_SIGNING_KEY`, rerun `python3 setup.py`
-9. `python3 example/run_session.py`
+| Step | Command/action | Env handoff | Side effect |
+| --- | --- | --- | --- |
+| 1 | `python3 scripts/preflight.py` | none | external read-only Anthropic access check |
+| 2 | `python3 scripts/create_environment.py` | append printed `ANTHROPIC_ENVIRONMENT_ID` to `.env`, reload env | creates Anthropic environment |
+| 3 | Generate environment key in Anthropic Console | append `ANTHROPIC_ENVIRONMENT_KEY`, reload env | creates scoped environment key |
+| 4 | `(cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox)` | none | publishes worker sandbox image |
+| 5 | `python3 scripts/create_agent.py` | append printed `ANTHROPIC_AGENT_ID`, reload env | creates Anthropic agent |
+| 6 | `python3 example/run_session.py --local-worker` | none | creates real session + Blaxel worker sandbox |
+| 7 | `(cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox)` | none | publishes orchestrator sandbox image |
+| 8 | `python3 setup.py` | register printed webhook URL | creates or updates persistent orchestrator sandbox + preview URL |
+| 9 | Register webhook, export `ANTHROPIC_WEBHOOK_SIGNING_KEY`, rerun `python3 setup.py` | append signing key, reload env | configures webhook verification |
+| 10 | `python3 example/run_session.py` | none | creates real session; webhook dispatches work |
 
 ## Key files
 
@@ -35,19 +38,23 @@
 - [GUIDE.md](GUIDE.md): narrative source for an integration guide.
 - [AGENTS.md](AGENTS.md): agent orientation.
 - [scripts/](scripts): setup helpers; create scripts print exports and do not mutate `.env`.
-- [orchestrator/app.py](orchestrator/app.py): webhook verify, worker spawn, duplicate suppression, poller launch.
+- [orchestrator/app.py](orchestrator/app.py): webhook verify, fast dispatch scheduling, SDK work claiming, worker sandbox/process launch.
 - [worker/Dockerfile](worker/Dockerfile): agent runtime image.
 - [worker/smoke.sh](worker/smoke.sh): command-surface and runtime-version smoke test for the worker image.
-- [example/run_session.py](example/run_session.py): E2E example; `--local-worker` skips webhook.
+- [example/run_session.py](example/run_session.py): E2E example; `--local-worker` claims exact work locally before webhook registration. After a webhook exists, Anthropic still sends `session.status_run_started`.
+- [example/local_worker.py](example/local_worker.py): local exact-work dispatcher used by examples.
 - [tests/](tests): local tests.
 
 ## Invariants
 
 - File tools use relative paths under `/workspace`; bash is still a shell inside the container.
 - Tool results must be non-empty.
-- Poller uses `keep_alive: True` and a timeout cap.
-- `--max-idle` controls poller exit after queue idle.
+- `ant beta:worker run` uses `keep_alive: True` and a timeout cap.
+- The orchestrator webhook server uses `keep_alive: True` so background dispatch can continue after a fast webhook response.
+- `ant beta:worker run` owns the work heartbeat; the dispatcher collects near-simultaneous session starts, readies known active session sandboxes before claiming, and then starts exact work promptly.
+- `--max-idle` controls worker exit after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation, not idle deletion.
+- Work process names are derived from `work_...` ids because Blaxel process records persist after completion.
 
 ## Links
 
