@@ -41,6 +41,7 @@ Anthropic CMA
 
 - Prove the worker first with `example/run_session.py --local-worker`.
 - Add the webhook only after the exact-work worker path works.
+- Use one active work-claiming path per Anthropic self-hosted environment while proving a run: local worker, webhook dispatcher, or another cookbook worker. The first claimant owns queued work.
 - Customize the agent runtime by editing `worker/Dockerfile`.
 
 ## Before You Start
@@ -175,6 +176,8 @@ EXAMPLE: PASS
 
 If you get this far, the agent session, environment key, worker image, Blaxel sandbox creation, exact work claiming, `ant beta:worker run`, file tool, bash tool, and result posting are working. The webhook is automation around the same exact-work dispatch path.
 
+After a webhook or another worker has been registered for the same self-hosted environment, do not use `--local-worker` as an isolated proof unless that other claimant is stopped. A passing transcript only proves this Blaxel path when the matching `cma-worker-<session>` sandbox shows the expected `ant-run-*` process for the session's `work_...` item.
+
 ## Quickstart: Add The Webhook
 
 The orchestrator is a small FastAPI webhook dispatcher on a Blaxel preview URL. It receives `session.status_run_started`, verifies the Anthropic signature, schedules dispatch, and returns 200 quickly. The background dispatcher readies the session sandbox before claiming work, drains queued work with the SDK, and starts one worker process for each claimed session work item.
@@ -255,6 +258,7 @@ Never put the org `ANTHROPIC_API_KEY` on the worker. The worker receives only th
 | Webhook returns 503 | Rerun `python3 setup.py` after exporting `ANTHROPIC_WEBHOOK_SIGNING_KEY`; if the key is present, inspect the event payload for a missing session id. Worker-start failures happen after the webhook 200 and show up in orchestrator logs. |
 | Webhook returns 401 | Confirm the `whsec_...` secret and that `anthropic[webhooks]` is installed in the orchestrator image. |
 | Later turns or reclaim retries do not start | Work process names must be derived from `work_...` ids and include a unique suffix. Completed process records persist. |
+| Transcript passes but the matching Blaxel sandbox has no `ant-run-*` process | Another work claimant handled the item. Stop any other local worker, webhook dispatcher, or cookbook worker using the same self-hosted environment before using the run as proof of this path. |
 | Output files are missing | File tools write under `/workspace`; nothing is auto-exported. Bash can also write `/mnt/session/outputs`, but that path is not exposed to contained file tools without `--unrestricted-paths`. |
 
 ## How It Works
@@ -264,9 +268,10 @@ The integration uses two Blaxel sandbox roles:
 - `orchestrator/`: FastAPI webhook dispatcher on a public preview URL. It verifies `whsec_...`, schedules background dispatch, readies session worker sandboxes, claims queued CMA work with the Anthropic SDK, and starts exact worker processes.
 - `worker/`: the agent runtime image. For each claimed `work_...`, the orchestrator starts `ant beta:worker run` with `ANTHROPIC_WORK_ID` and `ANTHROPIC_SESSION_ID`; the CLI executes tools in `/workspace`, heartbeats the lease, posts results, and stops the work item.
 - One session gets one worker sandbox name derived from the Anthropic session id, so `/workspace` can persist across later turns while the worker sandbox TTL allows.
-- `ant beta:worker run` owns the work heartbeat. The dispatcher waits briefly to collect near-simultaneous sessions, readies known active session sandboxes before claiming work, and bounds process-start retries so the ack-to-run handoff stays short.
+- `ant beta:worker run` owns the work heartbeat. The dispatcher waits briefly to collect near-simultaneous sessions, readies scheduled and still-queued session sandboxes before claiming work, and bounds process-start retries so the ack-to-run handoff stays short.
 - `--max-idle` is passed to `ant beta:worker run` and stops after the session goes idle with `stop_reason=end_turn`. It is not queue-idle cleanup.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is a cleanup backstop, not idle deletion.
+- Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--local-worker`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue.
 - Public preview URLs let the orchestrator receive webhooks and let generated apps be reachable during demos.
 - Blaxel process logs show the `ant-run-*` process and any supervised app processes inside the sandbox.
 

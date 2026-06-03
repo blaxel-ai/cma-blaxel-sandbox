@@ -21,6 +21,10 @@ WORKER_TTL = os.environ.get("BLAXEL_WORKER_TTL", "2h")
 KEEPALIVE_TIMEOUT = int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))
 DISPATCHER_RECLAIM_MS = int(os.environ.get("ANT_DISPATCHER_RECLAIM_MS", "30000"))
 DISPATCHER_DEBOUNCE_MS = int(os.environ.get("ANT_DISPATCHER_DEBOUNCE_MS", "250"))
+DISPATCHER_WORKER_ID = os.environ.get(
+    "ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID",
+    f"local-worker-{uuid4().hex[:8]}",
+)
 _work_ids_in_flight: set[str] = set()
 
 
@@ -174,21 +178,21 @@ async def dispatch_available_work(
             os.environ["ANTHROPIC_ENVIRONMENT_ID"],
             limit=50,
         )
-        active_session_ids = {
+        queued_session_ids = {
             session_id
             for work in (getattr(page, "data", None) or [])
-            if getattr(work, "state", None) != "stopped"
+            if getattr(work, "state", None) == "queued"
             if (session_id := work_session_id(work))
         }
     except Exception:
-        active_session_ids = set()
-    for session_id in sorted(active_session_ids - set(prepared_workers)):
+        queued_session_ids = set()
+    for session_id in sorted(queued_session_ids - set(prepared_workers)):
         prepared_workers[session_id] = await ready_worker_for_session(session_id)
     results: list[DispatchResult] = []
     async for work in client.beta.environments.work.poller(
         environment_id=os.environ["ANTHROPIC_ENVIRONMENT_ID"],
         environment_key=os.environ["ANTHROPIC_ENVIRONMENT_KEY"],
-        worker_id=f"{label}-{uuid4().hex[:8]}",
+        worker_id=DISPATCHER_WORKER_ID,
         block_ms=999,
         reclaim_older_than_ms=DISPATCHER_RECLAIM_MS,
         drain=True,

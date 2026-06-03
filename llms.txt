@@ -6,7 +6,7 @@
 
 - CMA: Anthropic runs Claude, session state, event history, configured skills, and tool selection.
 - Self-hosted execution: tool runtime, filesystem, processes, and network boundary live in the user's infrastructure.
-- Blaxel orchestrator: FastAPI webhook on a public preview URL; verifies `session.status_run_started`, schedules background dispatch, readies known active session sandboxes, claims queued work with the Anthropic SDK, and starts worker processes.
+- Blaxel orchestrator: FastAPI webhook on a public preview URL; verifies `session.status_run_started`, schedules background dispatch, readies scheduled and still-queued session sandboxes, claims queued work with the Anthropic SDK, and starts worker processes.
 - Blaxel worker: `ant beta:worker run`; receives `ANTHROPIC_WORK_ID` and `ANTHROPIC_SESSION_ID`, runs tools in `/workspace`, heartbeats, posts results, and stops the claimed work.
 - Worker image: self-hosted Docker image with `sandbox-api`, `ant`, and the language runtimes, package managers, database clients, and utilities from Anthropic's cloud sandbox reference. It smokes documented runtime floors, but it is not Anthropic's managed Ubuntu image.
 
@@ -51,10 +51,11 @@
 - Tool results must be non-empty.
 - `ant beta:worker run` uses `keep_alive: True` and a timeout cap.
 - The orchestrator webhook server uses `keep_alive: True` so background dispatch can continue after a fast webhook response.
-- `ant beta:worker run` owns the work heartbeat; the dispatcher collects near-simultaneous session starts, readies known active session sandboxes before claiming, and then starts exact work promptly.
+- `ant beta:worker run` owns the work heartbeat; the dispatcher collects near-simultaneous session starts, readies scheduled and still-queued session sandboxes before claiming, and then starts exact work promptly.
 - `--max-idle` controls worker exit after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation, not idle deletion.
 - Work process names are derived from `work_...` ids plus a unique suffix because Blaxel process records persist after completion and reclaimed work may need a fresh process.
+- Use one active work-claiming path per self-hosted environment during proof runs. Local workers, webhook dispatchers, environment-polling workers, and other cookbook workers all compete for the same Anthropic queue.
 
 ## Links
 

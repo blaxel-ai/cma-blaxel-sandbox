@@ -56,6 +56,10 @@ worker_region = os.environ.get("BL_REGION")
 dispatcher_poll_block_ms = int(os.environ.get("ANT_DISPATCHER_POLL_BLOCK_MS", "999"))
 dispatcher_reclaim_ms = int(os.environ.get("ANT_DISPATCHER_RECLAIM_MS", "30000"))
 dispatcher_debounce_ms = int(os.environ.get("ANT_DISPATCHER_DEBOUNCE_MS", "250"))
+dispatcher_worker_id = os.environ.get(
+    "ANTHROPIC_DISPATCHER_WORKER_ID",
+    f"cma-orchestrator-{re.sub(r'[^a-z0-9-]', '-', (os.environ.get('BLAXEL_SANDBOX_NAME') or os.environ.get('HOSTNAME') or 'local').lower())[:48]}",
+)
 worker_readiness_attempts = int(os.environ.get("BLAXEL_WORKER_READY_ATTEMPTS", "45"))
 worker_readiness_sleep = float(os.environ.get("BLAXEL_WORKER_READY_SLEEP", "2"))
 worker_run_attempts = int(os.environ.get("ANT_RUN_START_ATTEMPTS", "10"))
@@ -173,7 +177,7 @@ async def _worker_ready_for_session(session_id: str):
 
 
 async def _ready_workers_for_sessions(session_ids: set[str]) -> dict[str, object]:
-    """Ready all currently-known session sandboxes before the queue is claimed."""
+    """Ready currently-pending session sandboxes before the queue is claimed."""
     workers: dict[str, object] = {}
     if not session_ids:
         return workers
@@ -194,16 +198,16 @@ async def _ready_workers_for_sessions(session_ids: set[str]) -> dict[str, object
     return workers
 
 
-async def _active_work_session_ids() -> set[str]:
-    """Best-effort read-only look at active queue items before claiming them."""
+async def _queued_work_session_ids() -> set[str]:
+    """Best-effort read-only look at still-queued work before claiming it."""
     try:
         page = await client.beta.environments.work.list(environment_id, limit=50)
     except Exception as exc:
-        logger.warning("failed to list active work before claim: %r", exc)
+        logger.warning("failed to list queued work before claim: %r", exc)
         return set()
     session_ids: set[str] = set()
     for work in getattr(page, "data", None) or []:
-        if getattr(work, "state", None) == "stopped":
+        if getattr(work, "state", None) != "queued":
             continue
         if session_id := _work_session_id(work):
             session_ids.add(session_id)
@@ -308,7 +312,7 @@ async def _drain_and_dispatch_work(*, prepared_workers: dict[str, object] | None
             async for work in client.beta.environments.work.poller(
                 environment_id=environment_id,
                 environment_key=environment_key,
-                worker_id=f"cma-orchestrator-{uuid4().hex[:8]}",
+                worker_id=dispatcher_worker_id,
                 block_ms=dispatcher_poll_block_ms,
                 reclaim_older_than_ms=dispatcher_reclaim_ms,
                 drain=True,
@@ -343,7 +347,7 @@ async def _dispatch_for_session(session_id: str) -> None:
             await asyncio.sleep(dispatcher_debounce_ms / 1000)
         session_ids = set(_scheduled_session_ids)
         session_ids.add(session_id)
-        session_ids.update(await _active_work_session_ids())
+        session_ids.update(await _queued_work_session_ids())
         prepared_workers = await _ready_workers_for_sessions(session_ids)
         if session_id not in prepared_workers:
             raise RuntimeError(f"worker {_worker_name(session_id)} never became ready")
