@@ -55,7 +55,7 @@
 - `--max-idle` controls worker exit after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation, not idle deletion.
 - Work process names are derived from `work_...` ids plus a unique suffix because Blaxel process records persist after completion and reclaimed work may need a fresh process.
-- Use one active work-claiming path per self-hosted environment during proof runs. Local workers, webhook dispatchers, environment-polling workers, and other cookbook workers all compete for the same Anthropic queue.
+- Use one active work-claiming path per self-hosted environment during proof runs. Local workers, webhook dispatchers, environment-polling workers, and other cookbook workers all compete for the same Anthropic queue. `example/run_session.py` refuses to create a proof session while queue stats show queued work or active `workers_polling`.
 
 ## Links
 

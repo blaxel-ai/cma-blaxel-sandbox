@@ -43,7 +43,7 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 | `ANTHROPIC_ENVIRONMENT_KEY` | orchestrator and worker process | Scoped, revocable auth for work claiming and session tool execution. Agent-run shell can read worker env vars. |
 | `ANTHROPIC_AGENT_ID` | local shell | Agent to run for example sessions. |
 | `ANTHROPIC_WEBHOOK_SIGNING_KEY` | orchestrator | Webhook signature verification secret from the Anthropic Console. |
-| `BL_REGION`, `BLAXEL_WORKER_IMAGE`, `BLAXEL_WORKER_TTL`, `ANT_MAX_IDLE`, `ANT_KEEPALIVE_TIMEOUT`, `ANT_DISPATCHER_POLL_BLOCK_MS`, `ANT_DISPATCHER_RECLAIM_MS`, `ANT_DISPATCHER_DEBOUNCE_MS`, `ANTHROPIC_DISPATCHER_WORKER_ID`, `ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID`, `ANT_RUN_START_ATTEMPTS`, `ORCHESTRATOR_TTL`, `ORCHESTRATOR_KEEPALIVE_TIMEOUT` | optional | Runtime tuning; see `.env.example`. |
+| `BL_REGION`, `BLAXEL_WORKER_IMAGE`, `BLAXEL_WORKER_TTL`, `ANT_MAX_IDLE`, `ANT_KEEPALIVE_TIMEOUT`, `ANT_DISPATCHER_POLL_BLOCK_MS`, `ANT_DISPATCHER_RECLAIM_MS`, `ANT_DISPATCHER_DEBOUNCE_MS`, `ANTHROPIC_DISPATCHER_WORKER_ID`, `ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID`, `ANT_RUN_START_ATTEMPTS`, `BLAXEL_WORKER_READY_ATTEMPTS`, `BLAXEL_WORKER_READY_SLEEP`, `ORCHESTRATOR_TTL`, `ORCHESTRATOR_KEEPALIVE_TIMEOUT` | optional | Runtime tuning; see `.env.example`. |
 
 ## Commands
 
@@ -51,7 +51,7 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 | -- | -- | -- |
 | `.venv/bin/python -B -m py_compile setup.py orchestrator/app.py example/*.py scripts/*.py` | syntax check | local, safe |
 | `.venv/bin/python -m pytest` | setup, script, and orchestrator tests | local, safe |
-| `docker build -t cma-worker:smoke worker && docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke` | worker runtime smoke test | local Docker only |
+| `docker build --platform linux/amd64 -t cma-worker:smoke worker && docker run --platform linux/amd64 --rm --entrypoint /worker/smoke.sh cma-worker:smoke` | worker runtime smoke test | local Docker only |
 | `python3 scripts/preflight.py` | checks local tooling and Anthropic access | read-only external API call |
 | `python3 example/run_session.py --local-worker` | real session, direct worker spawn | creates Anthropic session + Blaxel sandbox; run before webhook registration for an isolated worker proof |
 | `python3 setup.py` | create/reuse orchestrator, restart webhook server, and print preview URL | creates persistent Blaxel sandbox if missing |
@@ -83,6 +83,7 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is not idle deletion and should be longer than expected sessions.
 - Worker sandbox names must be lowercase alphanumerics and hyphens; sanitize Anthropic session ids.
 - Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--local-worker`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue; a transcript only proves this path when the matching Blaxel worker sandbox shows the expected `ant-run-*` process.
+- `example/run_session.py` refuses to create a proof session while queue stats show queued work or active `workers_polling`; stop the other claimant or use a fresh environment.
 - Duplicate webhook deliveries are safe because dispatch scheduling is suppressed per session in-process, currently-starting work handoffs are suppressed in-process, and SDK work claiming is durable; if no queued work remains, another dispatcher likely claimed it.
 
 ## Safe vs. company-facing

@@ -6,6 +6,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import cma_setup
 import create_agent
+import preflight
 
 
 def test_environment_payload_is_self_hosted():
@@ -44,6 +45,12 @@ def test_anthropic_headers_include_beta_and_content_type():
     assert headers["anthropic-version"] == "2023-06-01"
     assert headers["anthropic-beta"] == "managed-agents-2026-04-01"
     assert headers["content-type"] == "application/json"
+
+
+def test_preflight_summarizes_json_command_output():
+    assert preflight._command_detail("[]") == "reachable (0 resources)"
+    assert preflight._command_detail('[{"metadata": {"name": "one"}}]') == "reachable (1 resources)"
+    assert preflight._command_detail('{"status": "ok"}') == "reachable"
 
 
 def test_agent_create_error_hints_when_model_is_rejected():

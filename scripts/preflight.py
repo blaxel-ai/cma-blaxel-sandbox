@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 
 from cma_setup import command_exists, command_ok, request_json, run_main, SetupError
@@ -18,6 +19,21 @@ def _require_env(name: str) -> tuple[bool, str]:
     if not value:
         return False, "not set"
     return True, "set"
+
+
+def _command_detail(detail: str) -> str:
+    if not detail:
+        return "reachable"
+    first_line = detail.splitlines()[0]
+    try:
+        parsed = json.loads(detail)
+    except json.JSONDecodeError:
+        return first_line
+    if isinstance(parsed, list):
+        return f"reachable ({len(parsed)} resources)"
+    if isinstance(parsed, dict):
+        return "reachable"
+    return first_line
 
 
 def main() -> None:
@@ -49,7 +65,7 @@ def main() -> None:
     workspace = os.environ.get("BL_WORKSPACE")
     if command_exists("bl") and workspace:
         ok, detail = command_ok(["bl", "get", "sandboxes", "--workspace", workspace, "-o", "json"])
-        print(_status_line(ok, "Blaxel sandbox API", detail.splitlines()[0] if detail else "reachable"))
+        print(_status_line(ok, "Blaxel sandbox API", _command_detail(detail)))
         if not ok:
             failures.append("Blaxel sandbox API")
 

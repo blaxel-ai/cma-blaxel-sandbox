@@ -4,8 +4,8 @@
 # agent's execution environment, so this is the contract the orchestrator relies
 # on before spawning it.
 #
-#   docker build -t cma-worker:smoke worker
-#   docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke
+#   docker build --platform linux/amd64 -t cma-worker:smoke worker
+#   docker run --platform linux/amd64 --rm --entrypoint /worker/smoke.sh cma-worker:smoke
 #
 # It can also be run in-sandbox via the process API against a spawned worker.
 set -e
@@ -49,7 +49,7 @@ do
 done
 
 require_min_version "Python" "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')" "3.12"
-require_min_version "Node.js" "$(node -p 'process.versions.node')" "20"
+require_min_version "Node.js" "$(node -p 'process.versions.node')" "22"
 require_min_version "Go" "$(go env GOVERSION | sed 's/^go//')" "1.22"
 require_min_version "Rust" "$(rustc --version | awk '{print $2}')" "1.77"
 require_min_version "Java" "$(java -version 2>&1 | awk -F\" '/version/ {print $2; exit}')" "21"
