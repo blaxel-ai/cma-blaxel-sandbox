@@ -43,7 +43,7 @@ Public quickstart: `README.md`. Narrative guide source: `GUIDE.md`. Machine summ
 | `ANTHROPIC_ENVIRONMENT_KEY` | orchestrator and worker process | Scoped, revocable auth for work claiming and session tool execution. Agent-run shell can read worker env vars. |
 | `ANTHROPIC_AGENT_ID` | local shell | Agent to run for example sessions. |
 | `ANTHROPIC_WEBHOOK_SIGNING_KEY` | orchestrator | Webhook signature verification secret from the Anthropic Console. |
-| `BL_REGION`, `BLAXEL_WORKER_IMAGE`, `BLAXEL_WORKER_TTL`, `ANT_MAX_IDLE`, `ANT_KEEPALIVE_TIMEOUT`, `ANT_DISPATCHER_POLL_BLOCK_MS`, `ANT_DISPATCHER_RECLAIM_MS`, `ANT_DISPATCHER_DEBOUNCE_MS`, `ANT_RUN_START_ATTEMPTS`, `ORCHESTRATOR_TTL`, `ORCHESTRATOR_KEEPALIVE_TIMEOUT` | optional | Runtime tuning; see `.env.example`. |
+| `BL_REGION`, `BLAXEL_WORKER_IMAGE`, `BLAXEL_WORKER_TTL`, `ANT_MAX_IDLE`, `ANT_KEEPALIVE_TIMEOUT`, `ANT_DISPATCHER_POLL_BLOCK_MS`, `ANT_DISPATCHER_RECLAIM_MS`, `ANT_DISPATCHER_DEBOUNCE_MS`, `ANTHROPIC_DISPATCHER_WORKER_ID`, `ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID`, `ANT_RUN_START_ATTEMPTS`, `ORCHESTRATOR_TTL`, `ORCHESTRATOR_KEEPALIVE_TIMEOUT` | optional | Runtime tuning; see `.env.example`. |
 
 ## Commands
 

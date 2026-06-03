@@ -56,6 +56,10 @@ worker_region = os.environ.get("BL_REGION")
 dispatcher_poll_block_ms = int(os.environ.get("ANT_DISPATCHER_POLL_BLOCK_MS", "999"))
 dispatcher_reclaim_ms = int(os.environ.get("ANT_DISPATCHER_RECLAIM_MS", "30000"))
 dispatcher_debounce_ms = int(os.environ.get("ANT_DISPATCHER_DEBOUNCE_MS", "250"))
+dispatcher_worker_id = os.environ.get(
+    "ANTHROPIC_DISPATCHER_WORKER_ID",
+    f"cma-orchestrator-{re.sub(r'[^a-z0-9-]', '-', (os.environ.get('BLAXEL_SANDBOX_NAME') or os.environ.get('HOSTNAME') or 'local').lower())[:48]}",
+)
 worker_readiness_attempts = int(os.environ.get("BLAXEL_WORKER_READY_ATTEMPTS", "45"))
 worker_readiness_sleep = float(os.environ.get("BLAXEL_WORKER_READY_SLEEP", "2"))
 worker_run_attempts = int(os.environ.get("ANT_RUN_START_ATTEMPTS", "10"))
@@ -308,7 +312,7 @@ async def _drain_and_dispatch_work(*, prepared_workers: dict[str, object] | None
             async for work in client.beta.environments.work.poller(
                 environment_id=environment_id,
                 environment_key=environment_key,
-                worker_id=f"cma-orchestrator-{uuid4().hex[:8]}",
+                worker_id=dispatcher_worker_id,
                 block_ms=dispatcher_poll_block_ms,
                 reclaim_older_than_ms=dispatcher_reclaim_ms,
                 drain=True,
