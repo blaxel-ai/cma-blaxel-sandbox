@@ -165,3 +165,12 @@ async def test_restart_tolerates_list_failure_on_fresh_sandbox(monkeypatch):
     assert sbx.process.killed == []
     assert len(sbx.process.execed) == 1
     assert name.startswith("webhook-server-")
+
+
+def test_passthrough_carries_orchestrator_dispatcher_worker_id():
+    # orchestrator/app.py reads ANTHROPIC_DISPATCHER_WORKER_ID; if setup.py does
+    # not pass it through, setting it in .env silently has no effect. Lock it.
+    assert "ANTHROPIC_DISPATCHER_WORKER_ID" in setup.PASSTHROUGH
+    # The local-worker id is host-side only (example/local_worker.py), so it must
+    # NOT be shipped into the orchestrator process.
+    assert "ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID" not in setup.PASSTHROUGH

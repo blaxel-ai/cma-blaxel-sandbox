@@ -53,10 +53,30 @@ def events(sid):
     return require_api("GET", f"/v1/sessions/{sid}/events").get("data") or []
 
 
+def queue_stats():
+    """Current work-queue stats for the configured self-hosted environment."""
+    return require_api("GET", f"/v1/environments/{os.environ['ANTHROPIC_ENVIRONMENT_ID']}/work/stats")
+
+
 def queue_pending():
     """depth + pending in the environment's work queue (0 == nothing waiting)."""
-    d = require_api("GET", f"/v1/environments/{os.environ['ANTHROPIC_ENVIRONMENT_ID']}/work/stats")
+    d = queue_stats()
     return (d.get("depth") or 0) + (d.get("pending") or 0)
+
+
+def require_quiet_proof_environment():
+    """Fail before creating a proof session if another worker can steal it."""
+    stats = queue_stats()
+    depth = stats.get("depth") or 0
+    pending = stats.get("pending") or 0
+    workers_polling = stats.get("workers_polling") or 0
+    if depth or pending or workers_polling:
+        raise SystemExit(
+            "example proof requires a quiet self-hosted environment "
+            f"(depth={depth}, pending={pending}, workers_polling={workers_polling}). "
+            "Stop any environment-polling worker, webhook dispatcher, or other cookbook "
+            "worker using this environment, or create a fresh environment, then rerun."
+        )
 
 
 def has_end_turn(items):
@@ -84,6 +104,7 @@ async def main():
         for _req in ("ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"):
             if not os.environ.get(_req):
                 raise SystemExit(f"missing required env: {_req}")
+    require_quiet_proof_environment()
 
     sess = require_api("POST", "/v1/sessions",
                        {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})

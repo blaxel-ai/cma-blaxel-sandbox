@@ -161,18 +161,24 @@ Creates a real Anthropic session and a real Blaxel worker sandbox. Run this befo
 python3 example/run_session.py --local-worker
 ```
 
+The script refuses to start if the self-hosted environment already has queued work or active pollers. That is intentional: the first claimant owns the work item, so an existing webhook dispatcher, environment-polling worker, or another cookbook worker would make this proof ambiguous.
+
 Checkpoint:
 
 ```text
 session: sesn_...
 message sent
 [local-worker] cma-worker-... is running work_... as ant-run-...
+  t=  0s status=idle events=3 queue=1
+  t= 10s status=running events=24 queue=0
   tool: write {"content": "hello from blaxel", "file_path": "hello.txt"}
   tool: bash {"command": "cat /workspace/hello.txt && echo"}
 
 final agent message: ... hello from blaxel ...
 EXAMPLE: PASS
 ```
+
+The repeating `t=...s` poll lines are expected while the worker cold-starts and runs the turn; the tool lines and `EXAMPLE: PASS` follow once it finishes.
 
 If you get this far, the agent session, environment key, worker image, Blaxel sandbox creation, exact work claiming, `ant beta:worker run`, file tool, bash tool, and result posting are working. The webhook is automation around the same exact-work dispatch path.
 
@@ -231,6 +237,8 @@ python3 example/run_session.py
 
 Checkpoint: the transcript should look like the worker-only run: session id, tool calls, final message containing `hello from blaxel`, and `EXAMPLE: PASS`.
 
+This command also expects a quiet self-hosted environment before it creates the session. If it reports `workers_polling`, stop other workers using the same `ANTHROPIC_ENVIRONMENT_ID` or create a fresh environment for the proof.
+
 ## Keys You Need
 
 | Value | Comes from | Lives where | Used for |
@@ -254,10 +262,12 @@ Never put the org `ANTHROPIC_API_KEY` on the worker. The worker receives only th
 | Worker freezes mid-session | The `ant run` process must start with `keep_alive: True`; outbound-only worker traffic does not by itself keep a Blaxel sandbox active. |
 | File tool rejects `/workspace/...` | File tools are scoped to `/workspace` but require relative paths like `hello.txt`. Bash commands can still use absolute paths inside the container. |
 | Worker-only run uses `/workspace/hello.txt` with the write tool | You are probably using an old agent. Rerun `python3 scripts/create_agent.py`, replace `ANTHROPIC_AGENT_ID` in `.env`, reload env, and rerun. |
+| Example proof reports `workers_polling` | Another worker is polling this self-hosted environment. Stop the environment-polling worker, webhook dispatcher, or other cookbook worker using the same `ANTHROPIC_ENVIRONMENT_ID`, or create a fresh environment for the proof. |
 | Tool result is rejected as empty | Shell commands must print something. Append `&& echo ok` after silent redirects. |
 | Webhook returns 503 | Rerun `python3 setup.py` after exporting `ANTHROPIC_WEBHOOK_SIGNING_KEY`; if the key is present, inspect the event payload for a missing session id. Worker-start failures happen after the webhook 200 and show up in orchestrator logs. |
 | Webhook returns 401 | Confirm the `whsec_...` secret and that `anthropic[webhooks]` is installed in the orchestrator image. |
 | Later turns or reclaim retries do not start | Work process names must be derived from `work_...` ids and include a unique suffix. Completed process records persist. |
+| `run_session.py --local-worker` exits with `no claimed work appeared` | A previous worker sandbox (`cma-worker-*`) is still polling the shared queue and claimed the work first; `ant beta:worker run` keeps polling within `--max-idle`. Delete leftover `cma-worker-*` sandboxes (or let them idle out) before an isolated local-worker proof. |
 | Transcript passes but the matching Blaxel sandbox has no `ant-run-*` process | Another work claimant handled the item. Stop any other local worker, webhook dispatcher, or cookbook worker using the same self-hosted environment before using the run as proof of this path. |
 | Output files are missing | File tools write under `/workspace`; nothing is auto-exported. Bash can also write `/mnt/session/outputs`, but that path is not exposed to contained file tools without `--unrestricted-paths`. |
 
@@ -307,8 +317,8 @@ Local checks:
 Worker image smoke:
 
 ```bash
-docker build -t cma-worker:smoke worker
-docker run --rm --entrypoint /worker/smoke.sh cma-worker:smoke
+docker build --platform linux/amd64 -t cma-worker:smoke worker
+docker run --platform linux/amd64 --rm --entrypoint /worker/smoke.sh cma-worker:smoke
 ```
 
 Real end-to-end checks create Anthropic sessions and Blaxel sandboxes:

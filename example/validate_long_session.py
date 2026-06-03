@@ -24,6 +24,7 @@ ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REG
 import argparse, asyncio, json, os, time, urllib.request, urllib.error
 
 from local_worker import dispatch_until_session_work
+from run_session import require_quiet_proof_environment
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 
@@ -95,6 +96,7 @@ async def main():
         for req in ("ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"):
             if not os.environ.get(req):
                 raise SystemExit(f"missing required env: {req}")
+    require_quiet_proof_environment()
 
     sess = require_api("POST", "/v1/sessions",
                        {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})

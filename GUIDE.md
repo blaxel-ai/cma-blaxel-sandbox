@@ -93,7 +93,7 @@ Important boundaries:
 
 ## Run it locally before the webhook
 
-The fastest proof is the worker-only path. It uses real Anthropic sessions and real Blaxel sandboxes, but does not require webhook registration to validate the runtime first. Run it before webhook registration. After a webhook or another worker exists for the same self-hosted environment, use this mode only after stopping the other claimant. The first worker to claim queued work owns it, so a passing transcript is only proof of this Blaxel path when the matching `cma-worker-<session>` sandbox shows the expected `ant-run-*` process.
+The fastest proof is the worker-only path. It uses real Anthropic sessions and real Blaxel sandboxes, but does not require webhook registration to validate the runtime first. Run it before webhook registration. After a webhook or another worker exists for the same self-hosted environment, use this mode only after stopping the other claimant. The example script refuses to create a proof session while the environment has queued work or active `workers_polling`, because the first worker to claim queued work owns it. A passing transcript is only proof of this Blaxel path when the matching `cma-worker-<session>` sandbox shows the expected `ant-run-*` process.
 
 1. Install local deps and load env. If following this file directly, first copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`, `BL_WORKSPACE`, and `BL_API_KEY`.
 
@@ -116,7 +116,11 @@ python3 scripts/preflight.py
 python3 scripts/create_environment.py
 ```
 
-Save the printed `ANTHROPIC_ENVIRONMENT_ID`, then generate `ANTHROPIC_ENVIRONMENT_KEY` in the Anthropic Console under **Manage > Environments**.
+Save the printed `ANTHROPIC_ENVIRONMENT_ID` to `.env`, generate `ANTHROPIC_ENVIRONMENT_KEY` in the Anthropic Console under **Manage > Environments**, and add it to `.env`. Reload env so both reach your shell before the worker-only run:
+
+```bash
+set -a; source .env; set +a
+```
 
 4. Build the worker:
 
@@ -218,6 +222,7 @@ Common failures:
 | Worker freezes | Start the worker process with `keep_alive: True`; outbound-only traffic does not hold the sandbox active. |
 | File tool rejects a path | Use `hello.txt`, not `/workspace/hello.txt`. |
 | Shell result is empty | Append output such as `&& echo ok`. |
+| Example proof reports `workers_polling` | Stop other workers using the same self-hosted environment, or use a fresh environment for this proof. |
 | Later turn or reclaim retry does not start | Use unique `ant-run-*` process names derived from the `work_...` id plus a suffix. Process records persist after completion. |
 | Transcript passes but no matching `ant-run-*` exists in the Blaxel worker sandbox | Another claimant handled the queued work. Stop any other local worker, webhook dispatcher, or cookbook worker using the same self-hosted environment before using the run as proof. |
 
