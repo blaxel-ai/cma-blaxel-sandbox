@@ -18,7 +18,7 @@ For --local-worker, also:
 """
 import argparse, asyncio, json, os, urllib.request, urllib.error
 
-from local_worker import dispatch_until_session_work
+from local_worker import BlaxelFeatureSetupError, dispatch_until_session_work, worker_name
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 
@@ -116,8 +116,9 @@ async def main():
                 {"events": [{"type": "user.message", "content": [{"type": "text", "text": args.message}]}]})
     print("message sent")
 
+    local_dispatch = None
     if args.local_worker:
-        await dispatch_until_session_work(sid)
+        local_dispatch = await dispatch_until_session_work(sid)
 
     # A CMA session reports status "idle" even while a turn is mid-flight, so we
     # can't watch status alone. Watch the work queue + transcript: the turn is done
@@ -174,7 +175,17 @@ async def main():
             f"errors={len(tool_errors)}, final_contains_hello={'hello from blaxel' in final.lower()})"
         )
     print("\nEXAMPLE: PASS")
+    expected_worker = local_dispatch.sandbox_name if local_dispatch else worker_name(sid)
+    expected_process = local_dispatch.process_name if local_dispatch else "ant-run-..."
+    if workspace := os.environ.get("BL_WORKSPACE"):
+        print("\nBlaxel process proof:")
+        print(f"  sandbox: {expected_worker}")
+        print(f"  process: {expected_process}")
+        print(f"  inspect: bl get sandbox {expected_worker} process --workspace {workspace} -o json")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except BlaxelFeatureSetupError as exc:
+        raise SystemExit(f"setup error: {exc}") from None

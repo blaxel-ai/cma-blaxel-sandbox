@@ -1,0 +1,73 @@
+name: Cookbook Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Check patch whitespace
+        if: github.event_name == 'pull_request'
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
+
+      - name: Compile Python sources
+        run: python -B -m compileall -q setup.py orchestrator example scripts
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Check preview demo CLI
+        run: python example/demo_preview_resume.py --help
+
+  image-smoke:
+    name: Docker image smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build worker image
+        run: docker build --platform linux/amd64 -t cma-worker:smoke worker
+
+      - name: Smoke worker image
+        run: docker run --platform linux/amd64 --rm --entrypoint /worker/smoke.sh cma-worker:smoke
+
+      - name: Build orchestrator image
+        run: docker build --platform linux/amd64 -t cma-orchestrator:smoke orchestrator
+
+      - name: Smoke orchestrator imports
+        run: >
+          docker run --platform linux/amd64 --rm --entrypoint python
+          -e ANTHROPIC_ENVIRONMENT_ID=env_test
+          -e ANTHROPIC_ENVIRONMENT_KEY=envkey_test
+          -e BL_API_KEY=blkey_test
+          -e BL_WORKSPACE=workspace_test
+          -e ANTHROPIC_WEBHOOK_SIGNING_KEY=whsec_test
+          cma-orchestrator:smoke
+          -c "import app, blaxel_features; print('orchestrator-import-ok')"

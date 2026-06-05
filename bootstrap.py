@@ -161,10 +161,12 @@ def _print_state(env: dict[str, str]) -> None:
 def _gate_env_key() -> None:
     print(
         "\n>> NEXT -- Anthropic Console (generate the environment key):\n"
-        "   1. Open the environment: https://platform.claude.com/workspaces/default/environments\n"
-        "   2. Click \"Generate environment key\".\n"
-        f"   3. Add it to .env:   export {ENV_KEY}=sk-ant-oat01-...\n"
-        "   4. Re-run:           python3 bootstrap.py\n"
+        "   1. Open https://platform.claude.com, select the workspace/project for\n"
+        "      your ANTHROPIC_API_KEY, then open Managed Agents > Environments.\n"
+        f"   2. Choose the environment id shown above ({ENV_ID}=env_...).\n"
+        "   3. Click \"Generate environment key\".\n"
+        f"   4. Add it to .env:   export {ENV_KEY}=sk-ant-oat01-...\n"
+        "   5. Re-run:           python3 bootstrap.py\n"
         "   (No `source .env` needed -- bootstrap reads .env directly.)"
     )
 
@@ -172,10 +174,13 @@ def _gate_env_key() -> None:
 def _gate_webhook() -> None:
     print(
         "\n>> NEXT -- Anthropic Console (register the webhook):\n"
-        "   1. Create a webhook subscribed to `session.status_run_started` at the URL\n"
-        "      setup.py printed above (https://<id>.preview.bl.run/webhook).\n"
-        f"   2. Add the signing secret to .env:   export {SIGNING_KEY}=whsec_...\n"
-        "   3. Re-run:                            python3 bootstrap.py"
+        "   1. Open https://platform.claude.com, select the same workspace/project,\n"
+        "      then create a Managed Agents webhook.\n"
+        "   2. Subscribe only to `session.status_run_started`.\n"
+        "   3. Set the destination to the exact URL setup.py printed above\n"
+        "      (https://<id>.preview.bl.run/webhook).\n"
+        f"   4. Add the one-time signing secret to .env:   export {SIGNING_KEY}=whsec_...\n"
+        "   5. Re-run:                                      python3 bootstrap.py"
     )
 
 

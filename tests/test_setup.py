@@ -174,3 +174,15 @@ def test_passthrough_carries_orchestrator_dispatcher_worker_id():
     # The local-worker id is host-side only (example/local_worker.py), so it must
     # NOT be shipped into the orchestrator process.
     assert "ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID" not in setup.PASSTHROUGH
+
+
+def test_passthrough_carries_optional_blaxel_worker_features():
+    assert {
+        "BLAXEL_WORKER_VOLUME_ENABLED",
+        "BLAXEL_WORKER_VOLUME_PREFIX",
+        "BLAXEL_WORKER_VOLUME_SIZE_MB",
+        "BLAXEL_WORKER_VOLUME_MOUNT",
+        "BLAXEL_WORKER_PROXY_DESTINATIONS",
+        "BLAXEL_WORKER_PROXY_SECRET_VALUE",
+        "BLAXEL_WORKER_PROXY_SKIP_REGION_CHECK",
+    }.issubset(set(setup.PASSTHROUGH))

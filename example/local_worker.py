@@ -9,11 +9,17 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
 from blaxel.core import SandboxInstance
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "orchestrator"))
+from blaxel_features import BlaxelFeatureSetupError, apply_worker_features  # noqa: E402
 
 WORKER_IMAGE = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest")
 WORKER_MAX_IDLE = os.environ.get("ANT_MAX_IDLE", "60s")
@@ -81,6 +87,7 @@ async def ready_worker_for_session(session_id: str):
     }
     if region := os.environ.get("BL_REGION"):
         spec["region"] = region
+    spec = await apply_worker_features(spec, session_id=session_id, region=region)
 
     worker = await SandboxInstance.create_if_not_exists(spec)
     await wait_for_worker_ready(worker, sandbox_name)
