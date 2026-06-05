@@ -26,6 +26,7 @@ from anthropic import AsyncAnthropic
 from blaxel.core import SandboxInstance
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from blaxel_features import apply_worker_features
 
 logger = getLogger("cma-orchestrator")
 
@@ -151,6 +152,7 @@ async def _ensure_worker_ready(session_id: str):
     }
     if worker_region:
         spec["region"] = worker_region
+    spec = await apply_worker_features(spec, session_id=session_id, region=worker_region)
 
     worker = await SandboxInstance.create_if_not_exists(spec)
     logger.info("worker %s readying for session %s", name, session_id)

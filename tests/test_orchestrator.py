@@ -136,6 +136,7 @@ async def test_dispatch_work_item_starts_ant_run_with_work_and_session_env(fake_
     assert run["env"]["ANTHROPIC_SESSION_ID"] == "sesn_ABC"
     assert run["env"]["ANTHROPIC_ENVIRONMENT_ID"] == "env_test"
     assert run["env"]["ANTHROPIC_ENVIRONMENT_KEY"] == app.environment_key
+    assert "BLAXEL_WORKER_PROXY_SECRET_VALUE" not in run["env"]
 
 
 async def test_dispatch_does_not_heartbeat_before_ant_run(monkeypatch):
