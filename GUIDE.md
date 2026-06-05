@@ -290,6 +290,41 @@ bl get sandboxes --workspace "$BL_WORKSPACE" -o json
 
 Delete leftover `cma-worker-*` sandboxes only after their sessions are no longer active.
 
+## Verify the cookbook
+
+Run the fast local checks before publishing docs or code changes:
+
+```bash
+.venv/bin/python -B -m py_compile bootstrap.py setup.py orchestrator/app.py orchestrator/blaxel_features.py example/*.py scripts/*.py
+.venv/bin/python -m pytest -q
+```
+
+Run the image smokes when the worker image, orchestrator image, or CI workflow changes:
+
+```bash
+docker build --platform linux/amd64 -t cma-worker:smoke worker
+docker run --platform linux/amd64 --rm --entrypoint /worker/smoke.sh cma-worker:smoke
+docker build --platform linux/amd64 -t cma-orchestrator:smoke orchestrator
+docker run --platform linux/amd64 --rm --entrypoint python \
+  -e ANTHROPIC_ENVIRONMENT_ID=env_test \
+  -e ANTHROPIC_ENVIRONMENT_KEY=envkey_test \
+  -e BL_API_KEY=blkey_test \
+  -e BL_WORKSPACE=workspace_test \
+  -e ANTHROPIC_WEBHOOK_SIGNING_KEY=whsec_test \
+  cma-orchestrator:smoke \
+  -c "import app, blaxel_features; print('orchestrator-import-ok')"
+```
+
+Live proof commands create Anthropic sessions and Blaxel resources. Use them when validating launch readiness, not for every wording edit:
+
+```bash
+python3 example/run_session.py --local-worker
+python3 example/run_session.py
+python3 example/demo_preview_resume.py
+python3 example/demo_preview_resume.py --private-preview
+python3 example/validate_long_session.py
+```
+
 ## Why Blaxel Sandboxes
 
 Blaxel is a strong fit for self-hosted CMA execution when you want:
