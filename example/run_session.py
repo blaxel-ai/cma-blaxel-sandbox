@@ -80,13 +80,21 @@ def require_quiet_proof_environment():
         )
 
 
-async def worker_sandbox_exists(sandbox_name: str) -> bool:
-    """True if this shell's BL credentials can see the worker sandbox."""
+async def worker_sandbox_lookup(sandbox_name: str) -> str:
+    """Look up the worker sandbox with this shell's BL credentials.
+
+    Returns "found", "missing" (a definitive not-found, so another claimant ran
+    the work), or "unknown" (auth/network failure: the lookup proves nothing).
+    Works with BL_API_KEY or an existing `bl login` session.
+    """
     try:
         await SandboxInstance.get(sandbox_name)
-        return True
-    except Exception:
-        return False
+        return "found"
+    except Exception as exc:
+        message = str(exc).lower()
+        if "404" in message or "not found" in message:
+            return "missing"
+        return "unknown"
 
 
 def proof_lines(sandbox_name: str, process_name: str, workspace: str) -> list[str]:
@@ -213,13 +221,14 @@ async def main():
     if dispatched:
         # Direct dispatch holds the actual worker instance; the proof is real.
         print("\n".join(proof_lines(dispatched.sandbox_name, dispatched.process_name, workspace)))
-    elif not os.environ.get("BL_API_KEY"):
-        print("\n".join(proof_lines(worker_name(sid), "ant-run-...", workspace)))
-        print("  (unverified: set BL_API_KEY to confirm this workspace ran the worker)")
-    elif await worker_sandbox_exists(worker_name(sid)):
-        print("\n".join(proof_lines(worker_name(sid), "ant-run-...", workspace)))
-    else:
+        return
+    lookup = await worker_sandbox_lookup(worker_name(sid))
+    if lookup == "missing":
         print("\n".join(claimed_elsewhere_lines(worker_name(sid), workspace)))
+        return
+    print("\n".join(proof_lines(worker_name(sid), "ant-run-...", workspace)))
+    if lookup == "unknown":
+        print("  (unverified: the sandbox lookup failed; check BL_API_KEY or `bl login`)")
 
 
 if __name__ == "__main__":
