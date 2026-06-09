@@ -69,16 +69,17 @@ def test_claimed_elsewhere_names_the_shared_environment_invariant():
 
 async def test_worker_sandbox_lookup_found(monkeypatch):
     seen = []
+    sandbox = object()
 
     class FakeSandboxInstance:
         @staticmethod
         async def get(name):
             seen.append(name)
-            return object()
+            return sandbox
 
     monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
 
-    assert await run_session.worker_sandbox_lookup("cma-worker-x") == "found"
+    assert await run_session.worker_sandbox_lookup("cma-worker-x") == ("found", sandbox)
     assert seen == ["cma-worker-x"]
 
 
@@ -90,7 +91,7 @@ async def test_worker_sandbox_lookup_missing_on_not_found(monkeypatch):
 
     monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
 
-    assert await run_session.worker_sandbox_lookup("cma-worker-x") == "missing"
+    assert await run_session.worker_sandbox_lookup("cma-worker-x") == ("missing", None)
 
 
 async def test_worker_sandbox_lookup_unknown_on_auth_failure(monkeypatch):
@@ -101,4 +102,31 @@ async def test_worker_sandbox_lookup_unknown_on_auth_failure(monkeypatch):
 
     monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
 
-    assert await run_session.worker_sandbox_lookup("cma-worker-x") == "unknown"
+    assert await run_session.worker_sandbox_lookup("cma-worker-x") == ("unknown", None)
+
+
+async def test_ant_run_process_name_picks_latest_ant_run():
+    from types import SimpleNamespace
+
+    class FakeProcessAPI:
+        async def list(self):
+            return [
+                SimpleNamespace(name="probe-abc123"),
+                SimpleNamespace(name="ant-run-sesn-x-1"),
+                SimpleNamespace(name="ant-run-sesn-x-2"),
+            ]
+
+    sandbox = SimpleNamespace(process=FakeProcessAPI())
+
+    assert await run_session.ant_run_process_name(sandbox) == "ant-run-sesn-x-2"
+
+
+async def test_ant_run_process_name_none_when_listing_fails():
+    class FakeProcessAPI:
+        async def list(self):
+            raise RuntimeError("boom")
+
+    from types import SimpleNamespace
+    sandbox = SimpleNamespace(process=FakeProcessAPI())
+
+    assert await run_session.ant_run_process_name(sandbox) is None
