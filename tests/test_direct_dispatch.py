@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from example import local_worker
+from example import direct_dispatch
 
 
 def _session_work(session_id: str, state: str = "queued"):
@@ -48,20 +48,20 @@ async def test_dispatch_available_work_only_prewarms_still_queued_sessions(monke
 
     monkeypatch.setenv("ANTHROPIC_ENVIRONMENT_ID", "env_test")
     monkeypatch.setenv("ANTHROPIC_ENVIRONMENT_KEY", "sk-env-test")
-    monkeypatch.setattr(local_worker, "AsyncAnthropic", lambda auth_token: fake_client)
-    monkeypatch.setattr(local_worker, "DISPATCHER_DEBOUNCE_MS", 0)
-    monkeypatch.setattr(local_worker, "DISPATCHER_WORKER_ID", "local-test-worker")
-    monkeypatch.setattr(local_worker, "ready_worker_for_session", ready_worker_for_session)
+    monkeypatch.setattr(direct_dispatch, "AsyncAnthropic", lambda auth_token: fake_client)
+    monkeypatch.setattr(direct_dispatch, "DISPATCHER_DEBOUNCE_MS", 0)
+    monkeypatch.setattr(direct_dispatch, "DISPATCHER_WORKER_ID", "direct-test-worker")
+    monkeypatch.setattr(direct_dispatch, "ready_worker_for_session", ready_worker_for_session)
 
-    assert await local_worker.dispatch_available_work() == []
+    assert await direct_dispatch.dispatch_available_work() == []
 
     assert ready_calls == ["sesn_queued"]
     assert work_api_calls == [{
         "environment_id": "env_test",
         "environment_key": "sk-env-test",
-        "worker_id": "local-test-worker",
+        "worker_id": "direct-test-worker",
         "block_ms": 999,
-        "reclaim_older_than_ms": local_worker.DISPATCHER_RECLAIM_MS,
+        "reclaim_older_than_ms": direct_dispatch.DISPATCHER_RECLAIM_MS,
         "drain": True,
         "auto_stop": False,
     }]

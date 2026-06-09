@@ -41,7 +41,7 @@ Console-only gates: generate `ANTHROPIC_ENVIRONMENT_KEY` for the created Anthrop
 | 3 | Generate environment key in Anthropic Console | append `ANTHROPIC_ENVIRONMENT_KEY`, reload env | creates scoped environment key |
 | 4 | `(cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox)` | none | publishes `sandbox/cma-worker:latest`; use matching `--name` for custom `BLAXEL_WORKER_IMAGE` |
 | 5 | `python3 scripts/create_agent.py` | append printed `ANTHROPIC_AGENT_ID`, reload env | creates Anthropic agent; set `ANTHROPIC_AGENT_MODEL` first only if needed |
-| 6 | `python3 example/run_session.py --local-worker` | none | creates real session + Blaxel worker sandbox |
+| 6 | `python3 example/run_session.py --direct-dispatch` | none | creates real session + Blaxel worker sandbox |
 | 7 | `(cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox)` | none | publishes `sandbox/cma-orchestrator:latest`; use matching `--name` for custom `ORCHESTRATOR_IMAGE` |
 | 8 | `python3 setup.py` | register printed webhook URL | creates or updates persistent orchestrator sandbox + preview URL |
 | 9 | Register webhook, export `ANTHROPIC_WEBHOOK_SIGNING_KEY`, rerun `python3 setup.py` | append signing key, reload env | configures webhook verification |
@@ -62,12 +62,12 @@ Console-only gates: generate `ANTHROPIC_ENVIRONMENT_KEY` for the created Anthrop
 - [AGENTS.md](AGENTS.md): agent orientation.
 - [scripts/](scripts): setup helpers; create scripts print exports and do not mutate `.env`.
 - [orchestrator/app.py](orchestrator/app.py): webhook verify, fast dispatch scheduling, SDK work claiming, worker sandbox/process launch.
-- [orchestrator/blaxel_features.py](orchestrator/blaxel_features.py): optional Volume config and public-preview Proxy config applied to both orchestrator and local-worker worker creation.
+- [orchestrator/blaxel_features.py](orchestrator/blaxel_features.py): optional Volume config and public-preview Proxy config applied to both orchestrator and direct-dispatch worker creation.
 - [worker/Dockerfile](worker/Dockerfile): agent runtime image.
 - [worker/smoke.sh](worker/smoke.sh): command-surface and runtime-version smoke test for the worker image.
-- [example/run_session.py](example/run_session.py): E2E example; `--local-worker` claims exact work locally before webhook registration. After a webhook exists, Anthropic still sends `session.status_run_started`.
+- [example/run_session.py](example/run_session.py): E2E example; `--direct-dispatch` claims exact work locally before webhook registration. After a webhook exists, Anthropic still sends `session.status_run_started`.
 - [example/demo_preview_resume.py](example/demo_preview_resume.py): preview demo; use `--private-preview` for a token-protected Blaxel preview.
-- [example/local_worker.py](example/local_worker.py): local exact-work dispatcher used by examples.
+- [example/direct_dispatch.py](example/direct_dispatch.py): direct exact-work dispatcher used by examples; claims work from this machine, the worker still runs in a Blaxel sandbox.
 - [tests/](tests): local tests.
 
 ## Invariants
@@ -81,7 +81,8 @@ Console-only gates: generate `ANTHROPIC_ENVIRONMENT_KEY` for the created Anthrop
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is a lifecycle backstop for abandoned workers, not idle deletion; standby/resume handles ordinary inactivity.
 - Work process names are derived from `work_...` ids plus a unique suffix because Blaxel process records persist after completion and reclaimed work may need a fresh process.
 - `EXAMPLE: PASS` proves transcript completion; Blaxel proof requires a matching `cma-worker-<session>` sandbox with the expected `ant-run-*` process/logs.
-- Use one active work-claiming path per self-hosted environment during proof runs. Local workers, webhook dispatchers, environment-polling workers, and other cookbook workers all compete for the same Anthropic queue. `example/run_session.py` refuses to create a proof session while queue stats show queued work or active `workers_polling`; if a webhook is still registered, Anthropic can wake another dispatcher after the pre-check.
+- Use one active work-claiming path per self-hosted environment during proof runs. Direct dispatchers, webhook orchestrators, environment-polling workers, and other cookbook workers all compete for the same Anthropic queue. `example/run_session.py` refuses to create a proof session while queue stats show queued work or active `workers_polling`; if a webhook is still registered, Anthropic can wake another dispatcher after the pre-check.
+- One Anthropic environment per Blaxel workspace: the winning claimant creates the worker with its own Blaxel credentials, so `BL_WORKSPACE` does not pin where a shared environment's work lands. In webhook mode `example/run_session.py` verifies the worker sandbox and reports when another claimant ran it.
 - Volume mode is per-session because a Volume can attach to one sandbox at a time. It requires Volume quota and `BL_REGION`, and mounts at `/workspace`.
 - Proxy mode is public preview, region-dependent, and only for outbound application/API calls from the worker, not for replacing `ANTHROPIC_ENVIRONMENT_KEY`.
 

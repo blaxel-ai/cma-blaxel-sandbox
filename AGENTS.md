@@ -29,7 +29,7 @@ Fast path: `python3 bootstrap.py --plan` shows the next action, and `python3 boo
 3. Generate `ANTHROPIC_ENVIRONMENT_KEY` in the Anthropic Console environment page.
 4. `(cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox)` publishes `sandbox/cma-worker:latest`; with a custom `BLAXEL_WORKER_IMAGE`, publish with the matching `bl push --name ...`.
 5. `python3 scripts/create_agent.py` prints `export ANTHROPIC_AGENT_ID=agent_...`; set `ANTHROPIC_AGENT_MODEL` first only if the default model is unavailable in the org.
-6. `python3 example/run_session.py --local-worker` validates the worker path before webhook registration.
+6. `python3 example/run_session.py --direct-dispatch` validates the worker path before webhook registration.
 7. `(cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox)` publishes `sandbox/cma-orchestrator:latest`; with a custom `ORCHESTRATOR_IMAGE`, publish with the matching `bl push --name ...`.
 8. `python3 setup.py` creates or reuses the orchestrator, restarts the webhook server, and prints the webhook URL.
 9. Register the Anthropic webhook for `session.status_run_started`, copy `whsec_...`, export `ANTHROPIC_WEBHOOK_SIGNING_KEY`, then rerun `python3 setup.py`.
@@ -46,7 +46,7 @@ Fast path: `python3 bootstrap.py --plan` shows the next action, and `python3 boo
 | `ANTHROPIC_AGENT_ID` | local shell | Agent to run for example sessions. |
 | `ANTHROPIC_AGENT_MODEL` | local shell | Optional override used by `scripts/create_agent.py`; default is `claude-opus-4-8`. |
 | `ANTHROPIC_WEBHOOK_SIGNING_KEY` | orchestrator | Webhook signature verification secret from the Anthropic Console. |
-| `BL_REGION`, `BLAXEL_WORKER_IMAGE`, `BLAXEL_WORKER_TTL`, `ANT_MAX_IDLE`, `ANT_KEEPALIVE_TIMEOUT`, `ANT_DISPATCHER_POLL_BLOCK_MS`, `ANT_DISPATCHER_RECLAIM_MS`, `ANT_DISPATCHER_DEBOUNCE_MS`, `ANTHROPIC_DISPATCHER_WORKER_ID`, `ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID`, `ANT_RUN_START_ATTEMPTS`, `BLAXEL_WORKER_READY_ATTEMPTS`, `BLAXEL_WORKER_READY_SLEEP`, `ORCHESTRATOR_NAME`, `ORCHESTRATOR_IMAGE`, `ORCHESTRATOR_TTL`, `ORCHESTRATOR_KEEPALIVE_TIMEOUT`, `BLAXEL_WORKER_VOLUME_*`, `BLAXEL_WORKER_PROXY_*` | optional | Runtime tuning and optional Volume/public-preview Proxy paths; see `.env.example`. |
+| `BL_REGION`, `BLAXEL_WORKER_IMAGE`, `BLAXEL_WORKER_TTL`, `ANT_MAX_IDLE`, `ANT_KEEPALIVE_TIMEOUT`, `ANT_DISPATCHER_POLL_BLOCK_MS`, `ANT_DISPATCHER_RECLAIM_MS`, `ANT_DISPATCHER_DEBOUNCE_MS`, `ANTHROPIC_DISPATCHER_WORKER_ID`, `ANTHROPIC_DIRECT_DISPATCHER_WORKER_ID`, `ANT_RUN_START_ATTEMPTS`, `BLAXEL_WORKER_READY_ATTEMPTS`, `BLAXEL_WORKER_READY_SLEEP`, `ORCHESTRATOR_NAME`, `ORCHESTRATOR_IMAGE`, `ORCHESTRATOR_TTL`, `ORCHESTRATOR_KEEPALIVE_TIMEOUT`, `BLAXEL_WORKER_VOLUME_*`, `BLAXEL_WORKER_PROXY_*` | optional | Runtime tuning and optional Volume/public-preview Proxy paths; see `.env.example`. |
 
 ## Commands
 
@@ -58,7 +58,7 @@ Fast path: `python3 bootstrap.py --plan` shows the next action, and `python3 boo
 | `python3 bootstrap.py --plan` | shows the next setup action without mutation | local, safe |
 | `python3 bootstrap.py` | guided setup; stops at Anthropic Console gates | creates real Anthropic/Blaxel resources after preflight |
 | `python3 scripts/preflight.py` | checks local tooling and Anthropic access | read-only external API call |
-| `python3 example/run_session.py --local-worker` | real session, direct worker spawn | creates Anthropic session + Blaxel sandbox; run before webhook registration for an isolated worker proof |
+| `python3 example/run_session.py --direct-dispatch` | real session, direct worker spawn | creates Anthropic session + Blaxel sandbox; run before webhook registration for an isolated worker proof |
 | `python3 setup.py` | create/reuse orchestrator, restart webhook server, and print preview URL | creates persistent Blaxel sandbox if missing |
 | `python3 example/run_session.py` | full webhook flow | creates real session; needs webhook/orchestrator |
 | `python3 example/demo_preview_resume.py` | preview URL + standby/resume behavior demo | creates real resources |
@@ -75,7 +75,7 @@ Fast path: `python3 bootstrap.py --plan` shows the next action, and `python3 boo
 | `orchestrator/app.py` | webhook verification, fast dispatch scheduling, SDK work claiming, worker sandbox/process launch |
 | `worker/Dockerfile` | the agent runtime: `ant`, cloud-sandbox-style language runtimes, database clients, and utilities |
 | `setup.py` | create/reuse orchestrator, restart webhook server with current env, print preview URL |
-| `example/run_session.py` | primary E2E example; `--local-worker` proves the worker before webhook registration |
+| `example/run_session.py` | primary E2E example; `--direct-dispatch` proves the worker before webhook registration |
 | `tests/` | local behavior tests |
 
 ## Invariants
@@ -89,7 +89,8 @@ Fast path: `python3 bootstrap.py --plan` shows the next action, and `python3 boo
 - `--max-idle` controls when `ant beta:worker run` exits after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is not idle deletion and should be longer than expected sessions.
 - Worker sandbox names must be lowercase alphanumerics and hyphens; sanitize Anthropic session ids.
-- Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--local-worker`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue; a transcript only proves this path when the matching Blaxel worker sandbox shows the expected `ant-run-*` process.
+- Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--direct-dispatch`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue; a transcript only proves this path when the matching Blaxel worker sandbox shows the expected `ant-run-*` process.
+- Use one Anthropic environment per Blaxel workspace. The winning claimant creates the worker with its own Blaxel credentials, so `BL_WORKSPACE` does not pin where a shared environment's work lands; in webhook mode `example/run_session.py` verifies the worker sandbox and reports when another claimant ran it.
 - `example/run_session.py` refuses to create a proof session while queue stats show queued work or active `workers_polling`; stop the other claimant or use a fresh environment.
 - Duplicate webhook deliveries are safe because dispatch scheduling is suppressed per session in-process, currently-starting work handoffs are suppressed in-process, and SDK work claiming is durable; if no queued work remains, another dispatcher likely claimed it.
 

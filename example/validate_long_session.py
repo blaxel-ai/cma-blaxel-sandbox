@@ -11,19 +11,19 @@ It also probes the security fix: it asks the agent to use its *write file tool*
 (not bash) to write outside /workspace, and reports whether that was refused
 (expected, since the worker now runs without --unrestricted-paths).
 
-Runs WITHOUT the Anthropic webhook by default (--local-worker spawns the worker
-directly after claiming its exact work item). Drop --local-worker once the
+Runs WITHOUT the Anthropic webhook by default (--direct-dispatch spawns the worker
+directly after claiming its exact work item). Drop --direct-dispatch once the
 webhook is registered to exercise the orchestrator path end to end instead.
 
 Set the same env as run_session.py first (ANTHROPIC_API_KEY, ANTHROPIC_ENVIRONMENT_ID,
 ANTHROPIC_ENVIRONMENT_KEY, ANTHROPIC_AGENT_ID, BL_API_KEY, BL_WORKSPACE, [BL_REGION]):
 
-    python3 example/validate_long_session.py                     # local-worker (no webhook)
-    python3 example/validate_long_session.py --no-local-worker   # rely on webhook + orchestrator
+    python3 example/validate_long_session.py                     # direct-dispatch (no webhook)
+    python3 example/validate_long_session.py --no-direct-dispatch   # rely on webhook + orchestrator
 """
 import argparse, asyncio, json, os, time, urllib.request, urllib.error
 
-from local_worker import dispatch_until_session_work
+from direct_dispatch import dispatch_until_session_work
 from run_session import require_quiet_proof_environment
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -82,9 +82,9 @@ def queue_pending():
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--message", default=DEFAULT_MESSAGE)
-    ap.add_argument("--local-worker", dest="local_worker", action="store_true", default=True,
+    ap.add_argument("--direct-dispatch", dest="direct_dispatch", action="store_true", default=True,
                     help="spawn the worker directly (default; no webhook needed)")
-    ap.add_argument("--no-local-worker", dest="local_worker", action="store_false",
+    ap.add_argument("--no-direct-dispatch", dest="direct_dispatch", action="store_false",
                     help="rely on the webhook + orchestrator instead")
     ap.add_argument("--max-min", type=float, default=10.0, help="overall timeout in minutes")
     args = ap.parse_args()
@@ -92,7 +92,7 @@ async def main():
     for req in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_AGENT_ID"):
         if not os.environ.get(req):
             raise SystemExit(f"missing required env: {req}")
-    if args.local_worker:
+    if args.direct_dispatch:
         for req in ("ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"):
             if not os.environ.get(req):
                 raise SystemExit(f"missing required env: {req}")
@@ -108,7 +108,7 @@ async def main():
                 {"events": [{"type": "user.message", "content": [{"type": "text", "text": args.message}]}]})
     print("message sent; expecting ~90s+ of sustained work\n")
 
-    if args.local_worker:
+    if args.direct_dispatch:
         await dispatch_until_session_work(sid, label="long-session-worker")
 
     t0 = time.monotonic()

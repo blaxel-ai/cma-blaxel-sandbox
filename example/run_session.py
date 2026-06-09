@@ -4,21 +4,22 @@
 Normal flow (webhook wired): create a session + send a message; the orchestrator
 receives the `session.status_run_started` webhook and spawns a worker automatically.
 
-For testing WITHOUT a webhook, pass --local-worker to spawn the worker directly
+For testing WITHOUT a webhook, pass --direct-dispatch to spawn the worker directly
 from here after claiming its exact work item with the SDK.
 
 Set these in your shell first:
     ANTHROPIC_API_KEY          your Anthropic API key (control-plane calls)
     ANTHROPIC_ENVIRONMENT_ID   env_...   (from step 1)
     ANTHROPIC_AGENT_ID         agent_... (the agent you created)
-For --local-worker, also:
+For --direct-dispatch, also:
     ANTHROPIC_ENVIRONMENT_KEY  sk-ant-oat01-...  (the worker's queue auth)
     BL_API_KEY, BL_WORKSPACE   so the Blaxel SDK can spawn the worker sandbox
     BL_REGION                  optional, e.g. us-pdx-1
 """
 import argparse, asyncio, json, os, urllib.request, urllib.error
 
-from local_worker import BlaxelFeatureSetupError, dispatch_until_session_work, worker_name
+from blaxel.core import SandboxInstance
+from direct_dispatch import BlaxelFeatureSetupError, dispatch_until_session_work, worker_name
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 
@@ -79,6 +80,37 @@ def require_quiet_proof_environment():
         )
 
 
+async def worker_sandbox_exists(sandbox_name: str) -> bool:
+    """True if this shell's BL credentials can see the worker sandbox."""
+    try:
+        await SandboxInstance.get(sandbox_name)
+        return True
+    except Exception:
+        return False
+
+
+def proof_lines(sandbox_name: str, process_name: str, workspace: str) -> list[str]:
+    return [
+        "",
+        "Blaxel process proof:",
+        f"  sandbox: {sandbox_name}",
+        f"  process: {process_name}",
+        f"  inspect: bl get sandbox {sandbox_name} process --workspace {workspace} -o json",
+    ]
+
+
+def claimed_elsewhere_lines(sandbox_name: str, workspace: str) -> list[str]:
+    return [
+        "",
+        f"NOTE: worker sandbox {sandbox_name} was NOT found in workspace {workspace}.",
+        "The transcript passed, so another claimant on this Anthropic environment",
+        "(a registered webhook orchestrator or another dispatcher) ran the worker in",
+        "its own Blaxel workspace. BL_WORKSPACE does not pin where shared-environment",
+        "work lands: use one Anthropic environment per Blaxel workspace, or rerun with",
+        "--direct-dispatch on an environment that only this workspace claims.",
+    ]
+
+
 def has_end_turn(items):
     for event in items:
         stop_reason = event.get("stop_reason") or {}
@@ -93,14 +125,14 @@ async def main():
         "Important: do not use any absolute path with the write tool. First, call the write tool "
         "with file_path exactly hello.txt and content exactly 'hello from blaxel'. Then run the "
         "shell command 'cat /workspace/hello.txt' and report its output."))
-    ap.add_argument("--local-worker", action="store_true",
+    ap.add_argument("--direct-dispatch", action="store_true",
                     help="spawn the worker directly instead of relying on the webhook + orchestrator")
     args = ap.parse_args()
 
     for _req in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_AGENT_ID"):
         if not os.environ.get(_req):
             raise SystemExit(f"missing required env: {_req}")
-    if args.local_worker:
+    if args.direct_dispatch:
         for _req in ("ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"):
             if not os.environ.get(_req):
                 raise SystemExit(f"missing required env: {_req}")
@@ -116,9 +148,9 @@ async def main():
                 {"events": [{"type": "user.message", "content": [{"type": "text", "text": args.message}]}]})
     print("message sent")
 
-    local_dispatch = None
-    if args.local_worker:
-        local_dispatch = await dispatch_until_session_work(sid)
+    dispatched = None
+    if args.direct_dispatch:
+        dispatched = await dispatch_until_session_work(sid)
 
     # A CMA session reports status "idle" even while a turn is mid-flight, so we
     # can't watch status alone. Watch the work queue + transcript: the turn is done
@@ -175,13 +207,19 @@ async def main():
             f"errors={len(tool_errors)}, final_contains_hello={'hello from blaxel' in final.lower()})"
         )
     print("\nEXAMPLE: PASS")
-    expected_worker = local_dispatch.sandbox_name if local_dispatch else worker_name(sid)
-    expected_process = local_dispatch.process_name if local_dispatch else "ant-run-..."
-    if workspace := os.environ.get("BL_WORKSPACE"):
-        print("\nBlaxel process proof:")
-        print(f"  sandbox: {expected_worker}")
-        print(f"  process: {expected_process}")
-        print(f"  inspect: bl get sandbox {expected_worker} process --workspace {workspace} -o json")
+    workspace = os.environ.get("BL_WORKSPACE")
+    if not workspace:
+        return
+    if dispatched:
+        # Direct dispatch holds the actual worker instance; the proof is real.
+        print("\n".join(proof_lines(dispatched.sandbox_name, dispatched.process_name, workspace)))
+    elif not os.environ.get("BL_API_KEY"):
+        print("\n".join(proof_lines(worker_name(sid), "ant-run-...", workspace)))
+        print("  (unverified: set BL_API_KEY to confirm this workspace ran the worker)")
+    elif await worker_sandbox_exists(worker_name(sid)):
+        print("\n".join(proof_lines(worker_name(sid), "ant-run-...", workspace)))
+    else:
+        print("\n".join(claimed_elsewhere_lines(worker_name(sid), workspace)))
 
 
 if __name__ == "__main__":
