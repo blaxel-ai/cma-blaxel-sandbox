@@ -183,7 +183,7 @@ The transcript should again end with `EXAMPLE: PASS`. For attribution, inspect t
 - **Process proof:** Blaxel process records and logs show which sandbox ran the exact CMA work item.
 - **Preview URLs:** `python3 example/demo_preview_resume.py` lets the agent build an app in `/workspace`, serve it through a Blaxel preview URL, and prove standby/resume. Add `--private-preview` for a token-protected preview.
 - **Volumes:** set `BLAXEL_WORKER_VOLUME_ENABLED=true` and `BL_REGION` to mount a per-session Blaxel Volume at `/workspace` when the workspace has Volume quota.
-- **Proxy secret injection:** set `BLAXEL_WORKER_PROXY_DESTINATIONS` and `BLAXEL_WORKER_PROXY_SECRET_VALUE` to use public-preview, region-dependent Blaxel Proxy routing for outbound worker requests. This is not a replacement for `ANTHROPIC_ENVIRONMENT_KEY`.
+- **Proxy secret injection (recommended for third-party credentials):** set `BLAXEL_WORKER_PROXY_DESTINATIONS` and `BLAXEL_WORKER_PROXY_SECRET_VALUE` to have Blaxel Proxy inject the credential into outbound worker requests. The secret never enters the worker sandbox or the CMA agent config. Public preview, region-dependent. This is not a replacement for `ANTHROPIC_ENVIRONMENT_KEY`.
 
 See [GUIDE.md](./GUIDE.md) for setup details and caveats for each optional path.
 

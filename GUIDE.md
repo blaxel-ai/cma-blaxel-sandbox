@@ -194,7 +194,11 @@ Use Blaxel capabilities where they make the CMA proof stronger or the agent's ru
 
 Volume-backed workspaces are per-session by design. A Blaxel Volume can attach to one sandbox at a time, and CMA sessions can run concurrently, so the cookbook creates `cma-workspace-<session>` instead of sharing one Volume across all workers. This path also requires Volume quota in the selected workspace; if quota is `0/0`, keep the default `/workspace` path or use a quota-enabled workspace for the Volume proof.
 
-Proxy secret injection is intentionally separate from the core `ANTHROPIC_ENVIRONMENT_KEY` flow. `ant beta:worker run` still receives the scoped environment key it needs to serve the claimed work item. Proxy injection is a public-preview option for the agent's outbound application calls, such as a generated app or script calling a third-party API.
+### Handle secrets
+
+The recommended way to give the agent access to third-party credentials in this template is Blaxel Proxy secret injection. Configure the proxy route with `BLAXEL_WORKER_PROXY_DESTINATIONS` and `BLAXEL_WORKER_PROXY_SECRET_VALUE`, and the proxy injects the credential into the worker's outbound requests to those destinations. The secret never enters the worker sandbox environment and never lives in the CMA agent or session config, so a prompt-injected or buggy agent cannot read or exfiltrate it from the sandbox. Domain filtering (`BLAXEL_WORKER_PROXY_ALLOWED_DOMAINS`) composes with this to restrict where the worker can connect at all.
+
+Proxy secret injection is intentionally separate from the core `ANTHROPIC_ENVIRONMENT_KEY` flow. `ant beta:worker run` still receives the scoped environment key it needs to serve the claimed work item; that key authenticates the worker to Anthropic's queue and cannot move to the proxy. Proxy injection covers the agent's outbound application calls, such as a generated app or script calling a third-party API.
 
 When Proxy env vars are set, the cookbook checks Blaxel platform configuration before creating the worker and fails fast if `BL_REGION` is missing or does not report `proxyAvailable: true`. This keeps the public-preview feature explicit without making the default worker path depend on it.
 
