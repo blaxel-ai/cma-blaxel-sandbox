@@ -5,7 +5,7 @@ This cookbook proves the self-hosted Claude Managed Agents path on Blaxel. Anthr
 The first proof is intentionally small: create one real CMA session, run its claimed work inside a Blaxel worker sandbox, then inspect the matching Blaxel process record.
 
 ```bash
-python3 example/run_session.py --local-worker
+python3 example/run_session.py --direct-dispatch
 ```
 
 ```text
@@ -27,7 +27,7 @@ Blaxel process proof:
 - Anthropic CMA owns Claude, session state, event history, and the self-hosted environment queue.
 - A Blaxel orchestrator sandbox receives `session.status_run_started`, readies the session sandbox, claims `work_...`, and starts `ant beta:worker run`.
 - A Blaxel worker sandbox runs the built-in CMA tools in that session's `/workspace`, heartbeats the work lease, posts tool results, and stops the work item.
-- Prove the worker first with `example/run_session.py --local-worker`; add the webhook only after that exact-work path works.
+- Prove the worker first with `example/run_session.py --direct-dispatch`; add the webhook only after that exact-work path works.
 - Read [GUIDE.md](./GUIDE.md) for deeper architecture, security boundaries, feature recipes, troubleshooting, and teardown.
 
 ## Before You Start
@@ -128,7 +128,7 @@ The default model is `claude-opus-4-8`. If that model is unavailable in your Ant
 ### 4. Run the worker proof
 
 ```bash
-python3 example/run_session.py --local-worker
+python3 example/run_session.py --direct-dispatch
 ```
 
 Pass criteria:
@@ -138,7 +138,9 @@ Pass criteria:
 - `bl get sandbox <worker> process --workspace "$BL_WORKSPACE" -o json` shows the matching `ant beta:worker run --workdir /workspace` process.
 - `bl logs sandbox <worker> <ant-run-process> --workspace "$BL_WORKSPACE" --period 1h` shows the same session running the `write` and `bash` tools.
 
-Use one active claimant per self-hosted environment while proving the path. A local worker, webhook dispatcher, environment-polling worker, or another cookbook worker can all claim the same queued work.
+Use one active claimant per self-hosted environment while proving the path. A direct dispatcher, webhook orchestrator, environment-polling worker, or another cookbook worker can all claim the same queued work.
+
+Use one Anthropic environment per Blaxel workspace. Whichever claimant wins creates the worker in its own workspace, so `BL_WORKSPACE` does not pin where a shared environment's work lands. In webhook mode the proof output verifies the worker sandbox with your `BL_API_KEY` and says plainly when another claimant ran it.
 
 ## Add The Webhook
 
@@ -174,7 +176,7 @@ Run the webhook path:
 python3 example/run_session.py
 ```
 
-The transcript should again end with `EXAMPLE: PASS`. For attribution, inspect the matching `cma-worker-<session>` sandbox and `ant-run-*` process the same way as the local-worker proof.
+The transcript should again end with `EXAMPLE: PASS`. For attribution, inspect the matching `cma-worker-<session>` sandbox and `ant-run-*` process the same way as the direct-dispatch proof.
 
 ## What Blaxel Adds
 

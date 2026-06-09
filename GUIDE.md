@@ -151,10 +151,10 @@ python3 scripts/create_agent.py
 
 Set `ANTHROPIC_AGENT_MODEL` before this step only if the default model is unavailable in your Anthropic org.
 
-6. Run the local-worker session:
+6. Run the direct-dispatch session:
 
 ```bash
-python3 example/run_session.py --local-worker
+python3 example/run_session.py --direct-dispatch
 ```
 
 Success looks like:
@@ -162,7 +162,7 @@ Success looks like:
 ```text
 session: sesn_...
 message sent
-[local-worker] cma-worker-... is running work_... as ant-run-...
+[direct-dispatch] cma-worker-... is running work_... as ant-run-...
   tool: write {"content": "hello from blaxel", "file_path": "hello.txt"}
   tool: bash {"command": "cat /workspace/hello.txt && echo"}
 
@@ -242,9 +242,9 @@ The rerun keeps the same preview URL and restarts the webhook server with the cu
 python3 example/run_session.py
 ```
 
-Success is the same transcript shape as the local-worker run. The difference is that Anthropic now triggers the orchestrator, and the orchestrator claims and dispatches the work item.
+Success is the same transcript shape as the direct-dispatch run. The difference is that Anthropic now triggers the orchestrator, and the orchestrator claims and dispatches the work item.
 
-As with the local-worker run, `EXAMPLE: PASS` from the transcript only confirms the session completed. To prove this orchestrator handled it rather than another claimant on the same environment, check the `cma-worker-<session>` sandbox for the expected `ant-run-*` process, or read the orchestrator logs for the claimed `work_...` id.
+As with the direct-dispatch run, `EXAMPLE: PASS` from the transcript only confirms the session completed. In webhook mode the example then verifies the `cma-worker-<session>` sandbox with your `BL_API_KEY`; if another claimant on the same environment ran the work, it prints a NOTE saying the worker landed in a different workspace instead of a proof command that 404s. To attribute the run fully, check the sandbox for the expected `ant-run-*` process, or read the orchestrator logs for the claimed `work_...` id.
 
 ```bash
 bl get sandbox cma-worker-sesn-... process --workspace "$BL_WORKSPACE" -o json
@@ -278,7 +278,7 @@ Common failures:
 | Volume setup reports `Quota exceeded: 0/0 volumes` | Disable `BLAXEL_WORKER_VOLUME_ENABLED` for the quickstart, or request Volume quota before using the Volume-backed `/workspace` path. |
 | Proxy setup says `BL_REGION` is missing or unsupported | Set `BL_REGION` to the worker sandbox region and choose a region where Blaxel platform configuration reports `proxyAvailable: true`. |
 | Later turn or reclaim retry does not start | Use unique `ant-run-*` process names derived from the `work_...` id plus a suffix. Process records persist after completion. |
-| Transcript passes but no matching `ant-run-*` exists in the Blaxel worker sandbox | Another claimant handled the queued work. Stop any other local worker, webhook dispatcher, or cookbook worker using the same self-hosted environment before using the run as proof. |
+| Transcript passes but no matching `ant-run-*` exists in the Blaxel worker sandbox | Another claimant handled the queued work. Stop any other direct dispatcher, webhook orchestrator, or cookbook worker using the same self-hosted environment before using the run as proof. |
 | Private preview works in the script but not in a browser | Private previews require either a `bl_preview_token` query parameter or the `X-Blaxel-Preview-Token` header. Rerun the preview demo with `--print-preview-token` only for manual testing. |
 
 For noisy proof environments, wait about 30 seconds and retry once. If `workers_polling` or queued work remains, delete this cookbook's orchestrator sandbox or use a fresh Anthropic environment before creating another proof session:
@@ -318,7 +318,7 @@ docker run --platform linux/amd64 --rm --entrypoint python \
 Live proof commands create Anthropic sessions and Blaxel resources. Use them when validating launch readiness, not for every wording edit:
 
 ```bash
-python3 example/run_session.py --local-worker
+python3 example/run_session.py --direct-dispatch
 python3 example/run_session.py
 python3 example/demo_preview_resume.py
 python3 example/demo_preview_resume.py --private-preview
@@ -349,7 +349,8 @@ The included worker image is cloud-sandbox-compatible, not Anthropic-managed. It
 - The worker uses `--workdir /workspace` and does not use `--unrestricted-paths`.
 - `--max-idle` controls when `ant beta:worker run` exits after the session goes idle with `stop_reason=end_turn`.
 - `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is a Blaxel lifecycle backstop for abandoned workers, not idle deletion; standby/resume handles ordinary inactivity and should keep expected sessions reusable until TTL or an expiration policy deletes them.
-- Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--local-worker`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue. Quiet queue stats before session creation do not prove isolation if Anthropic can still deliver `session.status_run_started` to a registered webhook.
+- Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--direct-dispatch`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue. Quiet queue stats before session creation do not prove isolation if Anthropic can still deliver `session.status_run_started` to a registered webhook.
+- Use one Anthropic environment per Blaxel workspace. The winning claimant creates the worker with its own Blaxel credentials, so `BL_WORKSPACE` does not pin where a shared environment's work lands.
 - Duplicate webhook deliveries are safe because dispatch waits briefly to collect near-simultaneous sessions, pre-readies scheduled and still-queued session sandboxes before claiming, suppresses duplicate session schedules and currently in-flight work handoffs in-process, and relies on the SDK claim step for durable queue idempotency. If no work is found, another dispatcher may already have claimed it.
 - Sandbox names allow lowercase alphanumerics and hyphens. Anthropic session ids are sanitized before becoming worker names.
 - This sample passes a service-account `BL_API_KEY` to the orchestrator so it can create worker sandboxes.

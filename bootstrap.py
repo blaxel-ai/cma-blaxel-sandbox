@@ -213,7 +213,7 @@ def _do_provision(env: dict[str, str]) -> None:
     env = merged_env(env, ENV_PATH)  # so the proof below sees the new agent id
 
     print("\n-> proving the worker (creates a real session + worker sandbox) ...")
-    if _run([sys.executable, str(REPO / "example" / "run_session.py"), "--local-worker"], env) != 0:
+    if _run([sys.executable, str(REPO / "example" / "run_session.py"), "--direct-dispatch"], env) != 0:
         print("   worker proof did not pass -- see the transcript above and the README 'Debug Fast' table.")
         print("   continuing to set up the webhook path; re-run the proof once it's resolved.")
 

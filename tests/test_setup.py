@@ -171,9 +171,9 @@ def test_passthrough_carries_orchestrator_dispatcher_worker_id():
     # orchestrator/app.py reads ANTHROPIC_DISPATCHER_WORKER_ID; if setup.py does
     # not pass it through, setting it in .env silently has no effect. Lock it.
     assert "ANTHROPIC_DISPATCHER_WORKER_ID" in setup.PASSTHROUGH
-    # The local-worker id is host-side only (example/local_worker.py), so it must
+    # The direct-dispatch id is host-side only (example/direct_dispatch.py), so it must
     # NOT be shipped into the orchestrator process.
-    assert "ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID" not in setup.PASSTHROUGH
+    assert "ANTHROPIC_DIRECT_DISPATCHER_WORKER_ID" not in setup.PASSTHROUGH
 
 
 def test_passthrough_carries_optional_blaxel_worker_features():

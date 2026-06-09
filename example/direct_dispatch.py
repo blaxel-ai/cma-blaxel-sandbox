@@ -1,8 +1,9 @@
-"""Local Blaxel worker launcher for examples.
+"""Direct dispatcher for examples: claim CMA work from this machine.
 
-This mirrors the orchestrator's true per-session path: claim exact CMA work with
-the SDK, then run that work in the matching Blaxel sandbox with
-`ant beta:worker run`.
+Only the dispatch (claim) step runs here. It mirrors the orchestrator's true
+per-session path: claim exact CMA work with the SDK, then run that work in the
+matching Blaxel sandbox with `ant beta:worker run`. The worker itself always
+runs in a Blaxel sandbox, never on this machine.
 """
 from __future__ import annotations
 
@@ -28,8 +29,8 @@ KEEPALIVE_TIMEOUT = int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))
 DISPATCHER_RECLAIM_MS = int(os.environ.get("ANT_DISPATCHER_RECLAIM_MS", "30000"))
 DISPATCHER_DEBOUNCE_MS = int(os.environ.get("ANT_DISPATCHER_DEBOUNCE_MS", "250"))
 DISPATCHER_WORKER_ID = os.environ.get(
-    "ANTHROPIC_LOCAL_DISPATCHER_WORKER_ID",
-    f"local-worker-{uuid4().hex[:8]}",
+    "ANTHROPIC_DIRECT_DISPATCHER_WORKER_ID",
+    f"direct-dispatch-{uuid4().hex[:8]}",
 )
 _work_ids_in_flight: set[str] = set()
 
@@ -113,7 +114,7 @@ async def dispatch_work_item(
     client: AsyncAnthropic,
     work,
     *,
-    label: str = "local-worker",
+    label: str = "direct-dispatch",
     prepared_worker=None,
 ) -> DispatchResult | None:
     session_id = work_session_id(work)
@@ -173,7 +174,7 @@ async def dispatch_work_item(
 
 async def dispatch_available_work(
     *,
-    label: str = "local-worker",
+    label: str = "direct-dispatch",
     prepared_workers: dict[str, object] | None = None,
 ) -> list[DispatchResult]:
     prepared_workers = prepared_workers or {}
@@ -220,7 +221,7 @@ async def dispatch_available_work(
 async def dispatch_until_session_work(
     session_id: str,
     *,
-    label: str = "local-worker",
+    label: str = "direct-dispatch",
     timeout_s: float = 30.0,
 ) -> DispatchResult:
     prepared_worker = await ready_worker_for_session(session_id)

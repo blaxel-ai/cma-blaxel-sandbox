@@ -1,7 +1,7 @@
 """Blaxel-native worker features for the CMA cookbook.
 
 These helpers keep optional sandbox features out of the default quickstart while
-making them available to both the webhook orchestrator and the local-worker
+making them available to both the webhook orchestrator and the direct-dispatch
 proof path.
 """
 from __future__ import annotations

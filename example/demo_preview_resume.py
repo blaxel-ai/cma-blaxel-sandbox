@@ -20,7 +20,7 @@ import argparse, asyncio, json, os, time, urllib.request, urllib.error
 from datetime import datetime, timedelta, UTC
 from uuid import uuid4
 
-from local_worker import dispatch_until_session_work
+from direct_dispatch import dispatch_until_session_work
 from run_session import require_quiet_proof_environment
 
 BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
