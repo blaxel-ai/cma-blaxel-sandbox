@@ -67,7 +67,7 @@ def test_claimed_elsewhere_names_the_shared_environment_invariant():
     assert "--direct-dispatch" in text
 
 
-async def test_worker_sandbox_exists_when_get_succeeds(monkeypatch):
+async def test_worker_sandbox_lookup_found(monkeypatch):
     seen = []
 
     class FakeSandboxInstance:
@@ -78,16 +78,27 @@ async def test_worker_sandbox_exists_when_get_succeeds(monkeypatch):
 
     monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
 
-    assert await run_session.worker_sandbox_exists("cma-worker-x")
+    assert await run_session.worker_sandbox_lookup("cma-worker-x") == "found"
     assert seen == ["cma-worker-x"]
 
 
-async def test_worker_sandbox_missing_when_get_raises(monkeypatch):
+async def test_worker_sandbox_lookup_missing_on_not_found(monkeypatch):
     class FakeSandboxInstance:
         @staticmethod
         async def get(name):
-            raise RuntimeError("404 Not Found")
+            raise RuntimeError('GET ...: 404 Not Found {"error":"Sandbox not found"}')
 
     monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
 
-    assert not await run_session.worker_sandbox_exists("cma-worker-x")
+    assert await run_session.worker_sandbox_lookup("cma-worker-x") == "missing"
+
+
+async def test_worker_sandbox_lookup_unknown_on_auth_failure(monkeypatch):
+    class FakeSandboxInstance:
+        @staticmethod
+        async def get(name):
+            raise RuntimeError("401 Unauthorized")
+
+    monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
+
+    assert await run_session.worker_sandbox_lookup("cma-worker-x") == "unknown"
