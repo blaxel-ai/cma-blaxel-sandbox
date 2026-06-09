@@ -214,8 +214,12 @@ def _do_provision(env: dict[str, str]) -> None:
 
     print("\n-> proving the worker (creates a real session + worker sandbox) ...")
     if _run([sys.executable, str(REPO / "example" / "run_session.py"), "--direct-dispatch"], env) != 0:
-        print("   worker proof did not pass -- see the transcript above and the README 'Debug Fast' table.")
-        print("   continuing to set up the webhook path; re-run the proof once it's resolved.")
+        # The webhook path builds on a proven worker; setting it up anyway buries
+        # the real failure under confusing downstream ones.
+        _die(
+            "worker proof did not pass -- fix it using the transcript above and the "
+            "README 'Debug Fast' table, then re-run bootstrap."
+        )
 
     print("\n-> publishing the orchestrator and starting its webhook server ...")
     if _run(["bl", "push", "--workspace", workspace, "--type", "sandbox"], env, cwd=REPO / "orchestrator") != 0:
