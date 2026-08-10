@@ -1,4 +1,4 @@
-anthropic[webhooks]>=0.105.2
+anthropic[webhooks]>=0.120.2
 blaxel>=0.2.54
-fastapi>=0.115.14
-uvicorn[standard]>=0.51.0
+fastapi>=0.141.1
+uvicorn[standard]>=0.52.1
