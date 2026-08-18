@@ -52,7 +52,7 @@ def main() -> None:
             failures.append(command)
 
     ok = importlib.util.find_spec("blaxel") is not None
-    print(_status_line(ok, "python package blaxel", "importable" if ok else "install blaxel>=0.2.54"))
+    print(_status_line(ok, "python package blaxel", "importable" if ok else "install blaxel>=0.4.1"))
     if not ok:
         failures.append("blaxel package")
 
