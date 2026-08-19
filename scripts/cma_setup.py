@@ -25,6 +25,7 @@ DEFAULT_AGENT_SYSTEM = (
     "(for example output redirected to a file), append a status echo such as && echo ok, "
     "because an empty tool result is rejected by the API."
 )
+DEFAULT_AGENT_MODEL = "claude-sonnet-5"
 
 
 class SetupError(RuntimeError):
@@ -88,13 +89,58 @@ def environment_payload(name: str) -> dict[str, Any]:
     return {"name": name, "config": {"type": "self_hosted"}}
 
 
-def agent_payload(name: str, model: str) -> dict[str, Any]:
-    return {
+def agent_payload(
+    name: str,
+    model: str,
+    *,
+    inference_geo: str | None = None,
+    advisor_model: str | None = None,
+    skills: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    if inference_geo not in (None, "global", "us"):
+        raise SetupError("ANTHROPIC_INFERENCE_GEO must be 'global' or 'us'")
+
+    payload: dict[str, Any] = {
         "name": name,
-        "model": model,
+        "model": {"id": model, "inference_geo": inference_geo} if inference_geo else model,
         "system": DEFAULT_AGENT_SYSTEM,
         "tools": [{"type": "agent_toolset_20260401"}],
+        "description": "A production-ready coding agent that executes inside a Blaxel sandbox.",
+        "metadata": {"cookbook": "blaxel-cma"},
     }
+    if skills:
+        payload["skills"] = skills
+    if advisor_model:
+        payload["multiagent"] = {
+            "type": "coordinator",
+            "agents": [
+                {"type": "self"},
+                {"type": "advisor", "model": advisor_model},
+            ],
+        }
+    return payload
+
+
+def parse_agent_skills(value: str | None) -> list[dict[str, str]]:
+    """Parse `xlsx,skill_abc@3` into Managed Agents skill entries."""
+    skills: list[dict[str, str]] = []
+    for raw in (value or "").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        skill_id, separator, version = raw.partition("@")
+        if not skill_id:
+            raise SetupError("ANTHROPIC_AGENT_SKILLS contains an empty skill id")
+        item = {
+            "type": "custom" if skill_id.startswith("skill_") else "anthropic",
+            "skill_id": skill_id,
+        }
+        if separator:
+            if not version:
+                raise SetupError(f"skill {skill_id!r} has an empty version")
+            item["version"] = version
+        skills.append(item)
+    return skills
 
 
 def command_exists(command: str) -> bool:

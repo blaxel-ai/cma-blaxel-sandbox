@@ -199,7 +199,7 @@ def _do_provision(env: dict[str, str]) -> None:
     if not workspace:
         _die("BL_WORKSPACE is not set")
 
-    print("\n-> publishing the worker image (one-time, ~3 GB upload; this can take a few minutes) ...")
+    print("\n-> publishing the quickstart worker image (one-time; this can take a few minutes) ...")
     if _run(["bl", "push", "--workspace", workspace, "--type", "sandbox"], env, cwd=REPO / "worker") != 0:
         _die("worker image push failed")
 
@@ -218,7 +218,7 @@ def _do_provision(env: dict[str, str]) -> None:
         # the real failure under confusing downstream ones.
         _die(
             "worker proof did not pass -- fix it using the transcript above and the "
-            "README 'Debug Fast' table, then re-run bootstrap."
+            "GUIDE.md 'Failure handling' table, then re-run bootstrap."
         )
 
     print("\n-> publishing the orchestrator and starting its webhook server ...")
@@ -233,7 +233,11 @@ def _do_finalize(env: dict[str, str]) -> None:
     if _run([sys.executable, str(REPO / "setup.py")], env) != 0:
         _die("orchestrator setup failed")
     print("\n-> proving the webhook path (creates a real session) ...")
-    _run([sys.executable, str(REPO / "example" / "run_session.py")], env)
+    if _run([sys.executable, str(REPO / "example" / "run_session.py")], env) != 0:
+        _die(
+            "webhook proof did not pass; setup is not complete. Check the session "
+            "receipt and orchestrator logs, then re-run bootstrap."
+        )
 
 
 def main(argv: list[str]) -> int:
@@ -286,7 +290,10 @@ def main(argv: list[str]) -> int:
             continue
         if step == "finalize":
             _do_finalize(env)
-            print("\nSetup complete. The webhook path is live; re-run any proof from the README 'Tests' section.")
+            print(
+                "\nSetup complete. The webhook path is live; re-run any proof from "
+                "the README 'Prove each layer' section."
+            )
             return 0
 
 

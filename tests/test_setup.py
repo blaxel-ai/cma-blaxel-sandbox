@@ -186,3 +186,31 @@ def test_passthrough_carries_optional_blaxel_worker_features():
         "BLAXEL_WORKER_PROXY_SECRET_VALUE",
         "BLAXEL_WORKER_PROXY_SKIP_REGION_CHECK",
     }.issubset(set(setup.PASSTHROUGH))
+
+
+def test_passthrough_carries_dispatch_recovery_controls():
+    assert {
+        "ANT_DISPATCHER_ATTEMPTS",
+        "ANT_DISPATCHER_RECOVERY_SECONDS",
+        "ANT_MAX_CONCURRENT_WORKER_STARTS",
+    }.issubset(set(setup.PASSTHROUGH))
+
+
+def test_normalize_url_handles_preview_url_forms():
+    assert setup._normalize_url("//abc.preview.bl.run/") == "https://abc.preview.bl.run"
+    assert setup._normalize_url("abc.preview.bl.run") == "https://abc.preview.bl.run"
+
+
+async def test_wait_for_http_retries_until_200(monkeypatch):
+    responses = iter([(503, {"status": "not_ready"}), (200, {"status": "ready"})])
+
+    def get_json(url):
+        assert url.endswith("/ready")
+        return next(responses)
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(setup, "_get_json", get_json)
+    monkeypatch.setattr(setup.asyncio, "sleep", no_sleep)
+    assert await setup._wait_for_http("https://example/ready") == {"status": "ready"}

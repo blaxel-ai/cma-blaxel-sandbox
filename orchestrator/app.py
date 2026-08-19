@@ -19,6 +19,7 @@ import asyncio
 import os
 import re
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from logging import getLogger
 from uuid import uuid4
 
@@ -64,12 +65,18 @@ dispatcher_worker_id = os.environ.get(
 worker_readiness_attempts = int(os.environ.get("BLAXEL_WORKER_READY_ATTEMPTS", "45"))
 worker_readiness_sleep = float(os.environ.get("BLAXEL_WORKER_READY_SLEEP", "2"))
 worker_run_attempts = int(os.environ.get("ANT_RUN_START_ATTEMPTS", "10"))
+max_concurrent_worker_starts = int(os.environ.get("ANT_MAX_CONCURRENT_WORKER_STARTS", "8"))
+dispatcher_attempts = int(os.environ.get("ANT_DISPATCHER_ATTEMPTS", "3"))
+recovery_interval_seconds = float(os.environ.get("ANT_DISPATCHER_RECOVERY_SECONDS", "15"))
 
 _dispatcher_lock = asyncio.Lock()
 _background_tasks: set[asyncio.Task] = set()
 _scheduled_session_ids: set[str] = set()
 _worker_ready_tasks: dict[str, asyncio.Task] = {}
 _work_ids_in_flight: set[str] = set()
+_worker_start_semaphore = asyncio.Semaphore(max(1, max_concurrent_worker_starts))
+_last_recovery_at: str | None = None
+_last_recovery_ok: bool | None = None
 
 
 def _worker_name(session_id: str) -> str:
@@ -143,22 +150,23 @@ async def _wait_for_worker_ready(worker, name: str) -> bool:
 
 
 async def _ensure_worker_ready(session_id: str):
-    name = _worker_name(session_id)
-    spec = {
-        "name": name,
-        "image": worker_image,
-        "memory": 4096,
-        "ttl": worker_ttl,        # max-age cleanup backstop: no orchestrator-side delete
-    }
-    if worker_region:
-        spec["region"] = worker_region
-    spec = await apply_worker_features(spec, session_id=session_id, region=worker_region)
+    async with _worker_start_semaphore:
+        name = _worker_name(session_id)
+        spec = {
+            "name": name,
+            "image": worker_image,
+            "memory": 4096,
+            "ttl": worker_ttl,
+        }
+        if worker_region:
+            spec["region"] = worker_region
+        spec = await apply_worker_features(spec, session_id=session_id, region=worker_region)
 
-    worker = await SandboxInstance.create_if_not_exists(spec)
-    logger.info("worker %s readying for session %s", name, session_id)
-    if not await _wait_for_worker_ready(worker, name):
-        raise RuntimeError(f"worker {name} never became ready")
-    return worker
+        worker = await SandboxInstance.create_if_not_exists(spec)
+        logger.info("worker %s readying for session %s", name, session_id)
+        if not await _wait_for_worker_ready(worker, name):
+            raise RuntimeError(f"worker {name} never became ready")
+        return worker
 
 
 async def _worker_ready_for_session(session_id: str):
@@ -203,12 +211,16 @@ async def _ready_workers_for_sessions(session_ids: set[str]) -> dict[str, object
 async def _queued_work_session_ids() -> set[str]:
     """Best-effort read-only look at still-queued work before claiming it."""
     try:
-        page = await client.beta.environments.work.list(environment_id, limit=50)
+        page = await client.beta.environments.work.list(environment_id, limit=100)
     except Exception as exc:
         logger.warning("failed to list queued work before claim: %r", exc)
         return set()
     session_ids: set[str] = set()
-    for work in getattr(page, "data", None) or []:
+    if hasattr(page, "__aiter__"):
+        works = [work async for work in page]
+    else:
+        works = getattr(page, "data", None) or []
+    for work in works:
         if getattr(work, "state", None) != "queued":
             continue
         if session_id := _work_session_id(work):
@@ -310,31 +322,39 @@ async def _drain_and_dispatch_work(*, prepared_workers: dict[str, object] | None
     async with _dispatcher_lock:
         dispatched = 0
         failed = 0
-        try:
-            async for work in client.beta.environments.work.poller(
-                environment_id=environment_id,
-                environment_key=environment_key,
-                worker_id=dispatcher_worker_id,
-                block_ms=dispatcher_poll_block_ms,
-                reclaim_older_than_ms=dispatcher_reclaim_ms,
-                drain=True,
-                auto_stop=False,
-            ):
-                dispatched += 1
-                session_id = _work_session_id(work)
-                prepared_worker = prepared_workers.get(session_id) if session_id else None
-                if session_id and prepared_worker is None:
-                    logger.warning(
-                        "claimed work %s for session %s without a pre-readied sandbox; "
-                        "webhook delivery may have arrived after this drain started",
-                        work.id,
-                        session_id,
-                    )
-                if not await _dispatch_work_item(work, prepared_worker=prepared_worker):
-                    failed += 1
-        except Exception as exc:
-            logger.error("dispatcher failed while claiming work: %r", exc)
-            return False
+        for attempt in range(max(1, dispatcher_attempts)):
+            try:
+                async for work in client.beta.environments.work.poller(
+                    environment_id=environment_id,
+                    environment_key=environment_key,
+                    worker_id=dispatcher_worker_id,
+                    block_ms=dispatcher_poll_block_ms,
+                    reclaim_older_than_ms=dispatcher_reclaim_ms,
+                    drain=True,
+                    auto_stop=False,
+                ):
+                    dispatched += 1
+                    session_id = _work_session_id(work)
+                    prepared_worker = prepared_workers.get(session_id) if session_id else None
+                    if session_id and prepared_worker is None:
+                        logger.warning(
+                            "claimed work %s for session %s without a pre-readied sandbox",
+                            work.id,
+                            session_id,
+                        )
+                    if not await _dispatch_work_item(work, prepared_worker=prepared_worker):
+                        failed += 1
+                break
+            except Exception as exc:
+                logger.error(
+                    "dispatcher claim attempt %d/%d failed: %r",
+                    attempt + 1,
+                    max(1, dispatcher_attempts),
+                    exc,
+                )
+                if attempt + 1 >= max(1, dispatcher_attempts):
+                    return False
+                await asyncio.sleep(min(2 ** attempt, 4))
         if dispatched == 0:
             logger.info("dispatcher found no queued work; another worker may have claimed it")
             return True
@@ -388,11 +408,43 @@ def _schedule_dispatch_for_session(session_id: str) -> bool:
     return True
 
 
+async def _recover_queued_work_once() -> bool:
+    """Recover work when a webhook is delayed or the process resumes from standby."""
+    global _last_recovery_at, _last_recovery_ok
+    _last_recovery_at = datetime.now(UTC).isoformat()
+    try:
+        session_ids = await _queued_work_session_ids()
+        if not session_ids:
+            _last_recovery_ok = True
+            return True
+        prepared = await _ready_workers_for_sessions(session_ids)
+        _last_recovery_ok = await _drain_and_dispatch_work(prepared_workers=prepared)
+        return bool(_last_recovery_ok)
+    except Exception as exc:
+        _last_recovery_ok = False
+        logger.error("recovery dispatch failed: %r", exc)
+        return False
+
+
+async def _recovery_loop() -> None:
+    while True:
+        await asyncio.sleep(recovery_interval_seconds)
+        await _recover_queued_work_once()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("orchestrator up (env %s, worker image %s)", environment_id, worker_image)
-    yield
-    logger.info("orchestrator shutting down")
+    recovery_task = None
+    if recovery_interval_seconds > 0:
+        recovery_task = asyncio.create_task(_recovery_loop(), name="queued-work-recovery")
+    try:
+        yield
+    finally:
+        if recovery_task:
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+        logger.info("orchestrator shutting down")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -422,4 +474,25 @@ async def webhook(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "service": "blaxel-cma-orchestrator"}
+
+
+@app.get("/ready")
+async def ready():
+    problems = []
+    if not os.environ.get("ANTHROPIC_WEBHOOK_SIGNING_KEY"):
+        problems.append("webhook signing key not configured")
+    if max_concurrent_worker_starts < 1:
+        problems.append("ANT_MAX_CONCURRENT_WORKER_STARTS must be at least 1")
+    if dispatcher_attempts < 1:
+        problems.append("ANT_DISPATCHER_ATTEMPTS must be at least 1")
+    payload = {
+        "status": "ready" if not problems else "not_ready",
+        "environment_id": environment_id,
+        "worker_image": worker_image,
+        "recovery_interval_seconds": recovery_interval_seconds,
+        "last_recovery_at": _last_recovery_at,
+        "last_recovery_ok": _last_recovery_ok,
+        "problems": problems,
+    }
+    return JSONResponse(payload, status_code=200 if not problems else 503)

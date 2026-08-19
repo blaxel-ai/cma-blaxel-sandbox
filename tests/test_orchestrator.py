@@ -424,7 +424,7 @@ async def test_queued_work_session_ids_ignores_stale_active_work(monkeypatch):
 
     async def _list(environment_id, limit):
         assert environment_id == app.environment_id
-        assert limit == 50
+        assert limit == 100
         return SimpleNamespace(data=works)
 
     monkeypatch.setattr(app, "client", SimpleNamespace(
@@ -436,6 +436,56 @@ async def test_queued_work_session_ids_ignores_stale_active_work(monkeypatch):
     ))
 
     assert await app._queued_work_session_ids() == {"sesn_queued"}
+
+
+async def test_queued_work_session_ids_consumes_sdk_paginator(monkeypatch):
+    works = [
+        SimpleNamespace(state="queued", data=SimpleNamespace(type="session", id=f"sesn_{index}"))
+        for index in range(125)
+    ]
+
+    class AsyncPage:
+        def __aiter__(self):
+            async def generate():
+                for work in works:
+                    yield work
+
+            return generate()
+
+    async def _list(environment_id, limit):
+        assert limit == 100
+        return AsyncPage()
+
+    monkeypatch.setattr(app, "client", SimpleNamespace(
+        beta=SimpleNamespace(
+            environments=SimpleNamespace(work=SimpleNamespace(list=_list))
+        )
+    ))
+    assert len(await app._queued_work_session_ids()) == 125
+
+
+async def test_recovery_prepares_and_drains_queued_sessions(monkeypatch):
+    prepared = {"sesn_a": object()}
+
+    async def queued():
+        return {"sesn_a"}
+
+    async def ready(session_ids):
+        assert session_ids == {"sesn_a"}
+        return prepared
+
+    monkeypatch.setattr(app, "_queued_work_session_ids", queued)
+    monkeypatch.setattr(app, "_ready_workers_for_sessions", ready)
+    seen = []
+
+    async def drain(*, prepared_workers):
+        seen.append(prepared_workers)
+        return True
+
+    monkeypatch.setattr(app, "_drain_and_dispatch_work", drain)
+    assert await app._recover_queued_work_once() is True
+    assert seen == [prepared]
+    assert app._last_recovery_ok is True
 
 
 async def test_schedule_dispatch_suppresses_duplicate_session(monkeypatch):
@@ -540,4 +590,21 @@ def test_webhook_ignores_non_started_events(client, monkeypatch, stub_unwrap):
 def test_health_ok(client):
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    assert r.json() == {"status": "ok", "service": "blaxel-cma-orchestrator"}
+
+
+def test_ready_requires_signing_key(client, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_WEBHOOK_SIGNING_KEY", raising=False)
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+
+
+def test_ready_reports_runtime_config(client, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_WEBHOOK_SIGNING_KEY", "whsec_test")
+    response = client.get("/ready")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["environment_id"] == app.environment_id
+    assert body["worker_image"] == app.worker_image

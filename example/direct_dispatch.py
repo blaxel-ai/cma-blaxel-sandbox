@@ -184,11 +184,15 @@ async def dispatch_available_work(
     try:
         page = await client.beta.environments.work.list(
             os.environ["ANTHROPIC_ENVIRONMENT_ID"],
-            limit=50,
+            limit=100,
         )
+        if hasattr(page, "__aiter__"):
+            listed_work = [work async for work in page]
+        else:
+            listed_work = getattr(page, "data", None) or []
         queued_session_ids = {
             session_id
-            for work in (getattr(page, "data", None) or [])
+            for work in listed_work
             if getattr(work, "state", None) == "queued"
             if (session_id := work_session_id(work))
         }

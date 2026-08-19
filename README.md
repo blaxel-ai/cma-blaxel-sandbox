@@ -1,219 +1,275 @@
-# Claude Managed Agents on Blaxel Sandboxes
+# Claude Managed Agents on Blaxel
 
-This cookbook proves the self-hosted Claude Managed Agents path on Blaxel. Anthropic runs the agent loop, session state, event history, and self-hosted environment queue; Blaxel runs the execution layer in sandboxes, with one orchestrator sandbox for webhooks and one worker sandbox per session.
+<p align="center">
+  <img src="assets/cma-blaxel-sandbox-15s.gif" alt="Claude Managed Agents running work in a Blaxel sandbox" width="960">
+</p>
 
-The first proof is intentionally small: create one real CMA session, run its claimed work inside a Blaxel worker sandbox, then inspect the matching Blaxel process record.
+<p align="center"><a href="assets/cma-blaxel-sandbox-15s-uhd.mp4">Watch the 4K MP4</a> · silent 15-second explainer</p>
 
-```bash
-python3 example/run_session.py --direct-dispatch
-```
+Claude Managed Agents (CMA) lets you define a reusable agent, equip it with tools and session state, start work from application events, and run each session in an isolated Blaxel sandbox with a concrete result and traceable lifecycle.
+
+Run Anthropic's hosted agent loop with tool execution in isolated Blaxel sandboxes. This cookbook gives you a verified worker, a webhook orchestrator, safe cost controls, live event output, and exact cleanup.
+
+![Claude Managed Agents flow through a Blaxel sandbox with process proof](assets/cma-blaxel-sandbox-flow.png)
+
+## What you get
+
+| Default | Value |
+| --- | --- |
+| Model | `claude-sonnet-5` |
+| Session budget | Hard `$1.00` list-cost ceiling |
+| Worker | One Blaxel sandbox per session |
+| Events | SDK stream with paginated history recovery |
+| Preview access | Private token by default |
+| Cleanup | Exact plan first, `--apply` required |
+
+The first proof makes Claude write a file, reads it through bash, validates the final marker, and prints the exact Blaxel process that ran it.
 
 ```text
-tool: write {"content": "hello from blaxel", "file_path": "hello.txt"}
-tool: bash {"command": "cat /workspace/hello.txt"}
-final agent message: ... hello from blaxel ...
+session: sesn_...
+  running
+  tool write: {"file_path": "hello.txt", ...}
+  tool bash: {"command": "cat /workspace/hello.txt"}
+  idle: end_turn
+
 EXAMPLE: PASS
+
+Usage receipt:
+  "model": "claude-sonnet-5"
+  "list_cost_cents": "..."
 
 Blaxel process proof:
   sandbox: cma-worker-sesn-...
   process: ant-run-...
-  inspect: bl get sandbox cma-worker-sesn-... process --workspace <workspace> -o json
 ```
 
-`EXAMPLE: PASS` proves the transcript completed. The matching `cma-worker-<session>` sandbox and `ant-run-*` process prove the work ran in the expected Blaxel sandbox.
+## Architecture
 
-## How It Works
-
-- Anthropic CMA owns Claude, session state, event history, and the self-hosted environment queue.
-- A Blaxel orchestrator sandbox receives `session.status_run_started`, readies the session sandbox, claims `work_...`, and starts `ant beta:worker run`.
-- A Blaxel worker sandbox runs the built-in CMA tools in that session's `/workspace`, heartbeats the work lease, posts tool results, and stops the work item.
-- Prove the worker first with `example/run_session.py --direct-dispatch`; add the webhook only after that exact-work path works.
-- Read [GUIDE.md](./GUIDE.md) for deeper architecture, security boundaries, feature recipes, troubleshooting, and teardown.
-
-## Before You Start
-
-You need:
-
-- Claude Managed Agents beta access and an `ANTHROPIC_API_KEY`.
-- A Blaxel workspace name for `BL_WORKSPACE`.
-- The `bl` CLI logged in with `bl login`.
-- A Blaxel service-account key for that workspace as `BL_API_KEY`.
-- Docker running locally.
-- `python3`.
-
-`BL_API_KEY` lets SDK code and the orchestrator spawn workers. It does not replace CLI login for `bl push`.
-
-Install local tooling and log in:
-
-```bash
-brew tap blaxel-ai/blaxel
-brew install blaxel
-bl login
+```mermaid
+flowchart LR
+    U["Your app"] -->|"create session and stream events"| A["Anthropic Managed Agents"]
+    A -->|"session.status_run_started"| O["Blaxel orchestrator"]
+    O -->|"claim exact work item"| A
+    O -->|"start ant worker"| W["Per-session Blaxel sandbox"]
+    W -->|"tool results and heartbeat"| A
+    W --> P["Process logs, private previews, optional Volume"]
 ```
 
-For Linux or WSL, use the [Blaxel CLI install docs](https://docs.blaxel.ai/cli-reference/introduction).
+Anthropic owns Claude, session state, event history, and the self-hosted work queue. Blaxel owns the worker filesystem, process execution, network controls, and runtime proof.
 
-Create the local Python environment and `.env`:
+## Start here
+
+You need Claude Managed Agents access, a Blaxel workspace, Docker, Python 3, and the `bl` CLI logged in with `bl login`.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements-dev.txt
+python -m pip install --require-hashes -r requirements-dev.lock
 cp .env.example .env
 ```
 
-Fill `.env` with the starting values:
+Set these three values in `.env`:
 
-```text
+```bash
 export ANTHROPIC_API_KEY=sk-ant-api03-...
-export BL_WORKSPACE=...
-export BL_API_KEY=...
+export BL_WORKSPACE=your-workspace
+export BL_API_KEY=your-service-account-key
 ```
 
-Load it:
+Inspect the next action without creating anything:
+
+```bash
+python3 bootstrap.py --plan
+```
+
+Run the guided setup when you are ready to create and publish resources:
+
+```bash
+python3 bootstrap.py
+```
+
+Bootstrap stops at two Console steps that require you:
+
+1. Generate the scoped environment key in the Anthropic Console.
+2. Register the printed webhook URL for `session.status_run_started`.
+
+It resumes from `.env` after each step. It does not report success unless the final webhook proof passes.
+
+### Upgrade an existing setup to Sonnet 5
+
+The default applies when you create a new agent. Managed Agent configurations are versioned, so an existing agent keeps its original model.
 
 ```bash
 set -a; source .env; set +a
-```
-
-## Quickstart: Prove The Worker
-
-Prefer a guided setup? `python3 bootstrap.py` runs every deterministic step and stops only at the two Anthropic Console gates. Use `python3 bootstrap.py --plan` to see the next action without mutating anything. Bootstrap reads `.env` directly and uses the default image names; use the manual commands below when you need custom names in a shared workspace.
-
-### 1. Check access
-
-```bash
-python3 scripts/preflight.py
-```
-
-Expected checkpoint:
-
-```text
-preflight passed
-```
-
-### 2. Create the self-hosted CMA environment
-
-```bash
-python3 scripts/create_environment.py
-```
-
-Add the printed `ANTHROPIC_ENVIRONMENT_ID=env_...` to `.env`. Then open the Anthropic Console, select the workspace/project for your API key, open Managed Agents > Environments, choose that environment, click **Generate environment key**, and add:
-
-```text
-export ANTHROPIC_ENVIRONMENT_KEY=sk-ant-oat01-...
-```
-
-Reload env:
-
-```bash
-set -a; source .env; set +a
-```
-
-### 3. Publish the worker image and create the agent
-
-```bash
-( cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox )
 python3 scripts/create_agent.py
+# Replace ANTHROPIC_AGENT_ID in .env with the printed value.
+python3 cookbook.py status
 ```
 
-Add the printed `ANTHROPIC_AGENT_ID=agent_...` to `.env`, then reload env again:
+The status output warns when the configured agent does not use `claude-sonnet-5`. It does not delete the old agent.
+
+## Prove each layer
+
+Prove the worker before you add a webhook:
 
 ```bash
 set -a; source .env; set +a
-```
-
-The default model is `claude-opus-4-8`. If that model is unavailable in your Anthropic org, set `ANTHROPIC_AGENT_MODEL` before rerunning `scripts/create_agent.py`.
-
-### 4. Run the worker proof
-
-```bash
 python3 example/run_session.py --direct-dispatch
 ```
 
-Pass criteria:
-
-- The transcript ends with `EXAMPLE: PASS`.
-- The output prints a `cma-worker-sesn-...` sandbox and an `ant-run-...` process.
-- `bl get sandbox <worker> process --workspace "$BL_WORKSPACE" -o json` shows the matching `ant beta:worker run --workdir /workspace` process.
-- `bl logs sandbox <worker> <ant-run-process> --workspace "$BL_WORKSPACE" --period 1h` shows the same session running the `write` and `bash` tools.
-
-Use one active claimant per self-hosted environment while proving the path. A direct dispatcher, webhook orchestrator, environment-polling worker, or another cookbook worker can all claim the same queued work.
-
-Use one Anthropic environment per Blaxel workspace. Whichever claimant wins creates the worker in its own workspace, so `BL_WORKSPACE` does not pin where a shared environment's work lands. In webhook mode the proof output verifies the worker sandbox with your `BL_API_KEY` and says plainly when another claimant ran it.
-
-## Add The Webhook
-
-After the worker proof passes, publish the orchestrator image and start the webhook server:
-
-```bash
-( cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox )
-python3 setup.py
-```
-
-`setup.py` prints a Blaxel preview URL:
-
-```text
-https://<id>.preview.bl.run/webhook
-```
-
-In the Anthropic Console, create a Managed Agents webhook for the same workspace/project, subscribe only to `session.status_run_started`, and set the destination to that exact URL. Copy the one-time `whsec_...` signing secret into `.env`:
-
-```text
-export ANTHROPIC_WEBHOOK_SIGNING_KEY=whsec_...
-```
-
-Reload env and rerun setup so the orchestrator verifies deliveries:
-
-```bash
-set -a; source .env; set +a
-python3 setup.py
-```
-
-Run the webhook path:
+Then prove the full webhook path:
 
 ```bash
 python3 example/run_session.py
 ```
 
-The transcript should again end with `EXAMPLE: PASS`. For attribution, inspect the matching `cma-worker-<session>` sandbox and `ant-run-*` process the same way as the direct-dispatch proof.
+A valid run has all three results:
 
-## What Blaxel Adds
+- `EXAMPLE: PASS` from deterministic transcript checks.
+- A usage receipt with model, tokens, cost, and active time.
+- A matching `cma-worker-*` sandbox and `ant-run-*` process.
 
-- **Process proof:** Blaxel process records and logs show which sandbox ran the exact CMA work item.
-- **Preview URLs:** `python3 example/demo_preview_resume.py` lets the agent build an app in `/workspace`, serve it through a Blaxel preview URL, and prove standby/resume. Add `--private-preview` for a token-protected preview.
-- **Volumes:** set `BLAXEL_WORKER_VOLUME_ENABLED=true` and `BL_REGION` to mount a per-session Blaxel Volume at `/workspace` when the workspace has Volume quota.
-- **Proxy secret injection (recommended for third-party credentials):** set `BLAXEL_WORKER_PROXY_DESTINATIONS` and `BLAXEL_WORKER_PROXY_SECRET_VALUE` to have Blaxel Proxy inject the credential into outbound worker requests. The secret never enters the worker sandbox or the CMA agent config. Public preview, region-dependent. This is not a replacement for `ANTHROPIC_ENVIRONMENT_KEY`.
+Use one active queue claimant per environment during proof. Another dispatcher can claim the work and make transcript-only attribution invalid.
 
-See [GUIDE.md](./GUIDE.md) for setup details and caveats for each optional path.
+## Try the useful examples
 
-## Debug Fast
+### Sonnet 5 with an Opus 5 advisor
 
-| Symptom | Check |
-| --- | --- |
-| `bl push` is not authenticated | Run `bl login` and confirm `bl workspaces --current`. |
-| Preflight fails on Anthropic | `ANTHROPIC_API_KEY` is missing, wrong-org, or lacks CMA beta access. |
-| Agent creation fails | Set `ANTHROPIC_AGENT_MODEL` to a model enabled for your Anthropic org. |
-| Example proof reports `workers_polling` | Stop the other claimant or use a fresh Anthropic environment. |
-| Transcript passes but no matching `ant-run-*` exists | Another worker handled the item; do not use the transcript as attribution proof. |
-| Volume or Proxy setup fails | Check Volume quota, `BL_REGION`, and `proxyAvailable`; keep optional features disabled for the base quickstart. |
-
-## Docs And Files
-
-- [GUIDE.md](./GUIDE.md): full architecture, feature recipes, troubleshooting, tests, and teardown.
-- [AGENTS.md](./AGENTS.md) and [llms.txt](./llms.txt): agent-facing setup paths.
-- [.env.example](./.env.example): complete environment variable template.
-- `orchestrator/`, `worker/`, and `example/`: webhook dispatcher, runtime image, and proof/demo scripts.
-
-## Tests
+Create an agent with the optional advisor, then prove that a real advisor thread ran:
 
 ```bash
-.venv/bin/python -B -m py_compile bootstrap.py setup.py orchestrator/app.py orchestrator/blaxel_features.py example/*.py scripts/*.py
-.venv/bin/python -m pytest -q
+export ANTHROPIC_ADVISOR_MODEL=claude-opus-5
+python3 scripts/create_agent.py
+# Save the printed ANTHROPIC_AGENT_ID, then reload .env.
+python3 example/run_session.py --direct-dispatch --scenario advisor
 ```
 
-The GitHub workflow also runs Docker image smoke checks for the worker and orchestrator.
+### Agent Skills
 
-## Cleanup
+Attach Anthropic or custom workspace skills when you create the agent. Use short names for Anthropic skills and `skill_*` IDs for custom skills.
 
-Delete the orchestrator sandbox with `bl delete sandbox "${ORCHESTRATOR_NAME:-cma-orchestrator-app}" --workspace "$BL_WORKSPACE"`. Also remove inactive `cma-worker-*` test sandboxes, any per-session `cma-workspace-*` Volumes you created, and the Anthropic webhook pointing at the deleted preview URL. See [GUIDE.md](./GUIDE.md#teardown) for the full checklist.
+```bash
+export ANTHROPIC_AGENT_SKILLS=xlsx,skill_01Example@latest
+python3 scripts/create_agent.py
+# Save the new agent id, then use the skill's real name or purpose.
+python3 example/run_session.py --direct-dispatch --scenario skill --skill-name xlsx
+```
+
+Self-hosted sessions do not accept session `resources`. Configure skills on the agent. Use session metadata plus your own staging logic for repository or object-store inputs.
+
+### Agent-authored app with private preview and resume
+
+```bash
+python3 example/demo_preview_resume.py
+```
+
+This example fails if the agent does not author valid code. It creates no harness fallback. It also proves private access, the supervised process, and the same process after sandbox standby and resume.
+
+Use `--public-preview` only when the app can be public.
+
+### Long session and file-tool containment
+
+```bash
+python3 example/validate_long_session.py
+```
+
+This runs more than 90 seconds of tool work. It fails on an event stall. It also requires the exact write outside `/workspace` to return a tool error.
+
+## Cost controls
+
+Every example session starts with a hard 100-cent ceiling. The API enforces the ceiling between model requests, so the last request can finish slightly above it.
+
+```bash
+# Raise the same session once if it reaches the first ceiling.
+python3 example/run_session.py --direct-dispatch \
+  --budget-cents 100 \
+  --resume-budget-cents 200
+
+# Deliberate opt-out.
+python3 example/run_session.py --direct-dispatch --no-budget
+```
+
+The scripts fail on `session.error`, `requires_action`, `retries_exhausted`, timeout, or a failed verification check.
+
+## Worker profiles
+
+The default quickstart image includes Python 3.12, Node.js 22, Git, shell tools, and common build utilities.
+
+```bash
+cd worker
+bl push --workspace "$BL_WORKSPACE" --type sandbox
+```
+
+The full profile adds Go, Rust, Java, Gradle, Maven, Ruby, PHP, database clients, and Docker tooling.
+
+```bash
+cd worker
+bl push --workspace "$BL_WORKSPACE" --type sandbox \
+  --name cma-worker-full \
+  --build-env-file full.build.env
+export BLAXEL_WORKER_IMAGE=sandbox/cma-worker-full:latest
+```
+
+Both profiles have separate container smoke tests in CI.
+
+## Operate it
+
+Read current queue, agent, model-drift warnings, recent cookbook sessions, workers, and Volumes:
+
+```bash
+python3 cookbook.py status
+```
+
+Preview exact per-session cleanup:
+
+```bash
+python3 cookbook.py cleanup --session sesn_...
+```
+
+Apply that exact plan:
+
+```bash
+python3 cookbook.py cleanup --session sesn_... --apply
+```
+
+Cleanup archives the session by default. It deletes the exact worker and optional Volume, then waits until each resource is absent. It retains the environment, agent, images, webhook, and orchestrator.
+
+## Production guardrails
+
+- The webhook verifies Anthropic signatures and returns quickly.
+- A recovery loop claims queued work after delayed webhooks or sandbox resume.
+- Worker starts use bounded concurrency and bounded retries.
+- `/health` is liveness. `/ready` checks webhook and dispatcher configuration.
+- The control-plane API key never enters a worker.
+- Proxy secret injection keeps third-party secrets out of worker environment variables.
+- A Volume is optional and session-scoped. Delete the worker before its Volume.
+- Requirements have minimum files for upgrades and hashed lock files for repeatable installs.
+
+Read [GUIDE.md](GUIDE.md) for security boundaries, optional Blaxel features, operations, and troubleshooting. Read [.env.example](.env.example) for every setting.
+
+## Verify locally
+
+```bash
+.venv/bin/python -m pip check
+.venv/bin/python -B -m compileall -q \
+  bootstrap.py cookbook.py setup.py orchestrator example scripts
+.venv/bin/python -m pytest -q
+
+docker build --platform linux/amd64 \
+  --build-arg WORKER_PROFILE=quickstart \
+  -t cma-worker:quickstart worker
+docker run --platform linux/amd64 --rm \
+  --entrypoint /worker/smoke.sh cma-worker:quickstart
+```
+
+## Current upstream contract
+
+This cookbook targets:
+
+- Anthropic Managed Agents beta header `managed-agents-2026-04-01`.
+- Anthropic Python SDK `0.121.0`.
+- Anthropic CLI `1.22.1`.
+- Blaxel Python SDK `0.4.1`.
+- Claude Sonnet 5 model ID `claude-sonnet-5`.
+
+Primary references: [Managed Agents sessions](https://platform.claude.com/docs/en/managed-agents/sessions), [events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming), [self-hosted sandboxes](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes), [Agent Skills](https://platform.claude.com/docs/en/managed-agents/skills), [multiagent orchestration](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration), and [Claude Sonnet 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5).

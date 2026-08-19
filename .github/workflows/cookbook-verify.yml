@@ -26,17 +26,17 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: requirements-dev.lock
 
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: python -m pip install --require-hashes -r requirements-dev.lock
 
       - name: Check patch whitespace
         if: github.event_name == 'pull_request'
         run: git diff --check "origin/${{ github.base_ref }}...HEAD"
 
       - name: Compile Python sources
-        run: python -B -m compileall -q setup.py orchestrator example scripts
+        run: python -B -m compileall -q bootstrap.py cookbook.py setup.py orchestrator example scripts
 
       - name: Run tests
         run: python -m pytest -q
@@ -44,19 +44,38 @@ jobs:
       - name: Check preview demo CLI
         run: python example/demo_preview_resume.py --help
 
+      - name: Check operations CLI
+        run: python cookbook.py --help
+
   image-smoke:
-    name: Docker image smoke
+    name: Worker ${{ matrix.profile }} image smoke
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile: [quickstart, full]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Build worker image
-        run: docker build --platform linux/amd64 -t cma-worker:smoke worker
+        run: >
+          docker build --platform linux/amd64
+          --build-arg WORKER_PROFILE=${{ matrix.profile }}
+          -t cma-worker:${{ matrix.profile }} worker
 
       - name: Smoke worker image
-        run: docker run --platform linux/amd64 --rm --entrypoint /worker/smoke.sh cma-worker:smoke
+        run: >
+          docker run --platform linux/amd64 --rm --entrypoint /worker/smoke.sh
+          cma-worker:${{ matrix.profile }}
+
+  orchestrator-image:
+    name: Orchestrator image smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Build orchestrator image
         run: docker build --platform linux/amd64 -t cma-orchestrator:smoke orchestrator

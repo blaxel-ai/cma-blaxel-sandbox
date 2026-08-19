@@ -1,104 +1,63 @@
-# Claude Managed Agents on Blaxel (self-hosted sandbox cookbook)
+# Claude Managed Agents on Blaxel
 
-> Anthropic hosts the CMA agent loop and environment work queue. Blaxel sandboxes run self-hosted tool execution. This repo uses an orchestrator sandbox for the webhook dispatcher and one worker sandbox per session. AI agents should read AGENTS.md first.
+Anthropic hosts the agent loop, session state, event history, skills, budgets, and self-hosted work queue. Blaxel runs a webhook orchestrator and one tool-execution sandbox per session.
 
-## Docs-only setup route
+## Fast route
 
-Read order for a cold agent: `AGENTS.md`, then `README.md`, then `.env.example`; use `GUIDE.md` for deeper narrative and `llms.txt` for a compact index. External links are reference material, not required for the main cookbook path after a human supplies accounts/access.
+1. Read `AGENTS.md`, `README.md`, then `.env.example`.
+2. Install `requirements-dev.lock` with `--require-hashes`.
+3. Run `python3 bootstrap.py --plan` before any mutation.
+4. Run `python3 bootstrap.py` only with approval for its named Anthropic and Blaxel resource changes.
+5. Prove direct dispatch before the webhook path.
 
-Human prerequisites: Blaxel workspace, `bl login`, Docker running locally, service-account `BL_API_KEY` for `BL_WORKSPACE`, Claude Managed Agents beta access, and `ANTHROPIC_API_KEY`. `BL_API_KEY` lets SDK code and the orchestrator spawn workers; it does not replace CLI login for `bl push`.
+## Current contract
 
-Console-only gates: generate `ANTHROPIC_ENVIRONMENT_KEY` for the created Anthropic environment, and register the Blaxel preview webhook for `session.status_run_started` to receive `ANTHROPIC_WEBHOOK_SIGNING_KEY`.
+- Default model: `claude-sonnet-5`.
+- Default session budget: 100 US cents.
+- Anthropic beta: `managed-agents-2026-04-01`.
+- Anthropic Python SDK: `0.121.0`.
+- Anthropic worker CLI: `1.22.1`.
+- Blaxel Python SDK: `0.4.1`.
+- Event handling: SDK stream, `session.error` failure, complete paginated reconciliation.
+- Self-hosted session `resources`: unsupported. Use agent skills or metadata-driven staging.
 
-## Core concepts
+## Key commands
 
-- CMA: Anthropic runs Claude, session state, event history, configured skills, and tool selection.
-- Self-hosted execution: tool runtime, filesystem, processes, and network boundary live in the user's infrastructure.
-- Blaxel orchestrator: FastAPI webhook on a public preview URL; verifies `session.status_run_started`, schedules background dispatch, readies scheduled and still-queued session sandboxes, claims queued work with the Anthropic SDK, and starts worker processes.
-- Blaxel worker: `ant beta:worker run`; receives `ANTHROPIC_WORK_ID` and `ANTHROPIC_SESSION_ID`, runs tools in `/workspace`, heartbeats, posts results, and stops the claimed work.
-- Worker image: self-hosted Docker image with `sandbox-api`, `ant`, and the language runtimes, package managers, database clients, and utilities from Anthropic's cloud sandbox reference. It smokes documented runtime floors, but it is not Anthropic's managed Ubuntu image.
-- Optional Blaxel-native upgrades: Blaxel process records/logs prove which worker ran the tools; `example/demo_preview_resume.py` demonstrates public or token-protected private preview URLs plus standby/resume; `BLAXEL_WORKER_VOLUME_ENABLED=true` mounts a per-session Volume at `/workspace` when Volume quota is available.
-- Optional public-preview upgrade: `BLAXEL_WORKER_PROXY_DESTINATIONS` + `BLAXEL_WORKER_PROXY_SECRET_VALUE` configure Blaxel Proxy secret injection for outbound worker requests. Keep Proxy opt-in, label it public preview and region-dependent, and run it in a proxy-supported region that matches the worker sandbox.
+```bash
+python3 bootstrap.py --plan
+python3 example/run_session.py --direct-dispatch
+python3 example/run_session.py
+python3 example/run_session.py --direct-dispatch --scenario advisor
+python3 example/run_session.py --direct-dispatch --scenario skill --skill-name xlsx
+python3 example/demo_preview_resume.py
+python3 example/validate_long_session.py
+python3 cookbook.py status
+python3 cookbook.py cleanup --session sesn_...
+```
 
-## Credentials
+## Proof rules
 
-- `ANTHROPIC_API_KEY`: local control-plane key. Creates environments, agents, sessions, and reads events. Never put it on the worker.
-- `ANTHROPIC_ENVIRONMENT_ID`: self-hosted environment id created by `scripts/create_environment.py`; local shell, orchestrator, and worker process.
-- `ANTHROPIC_ENVIRONMENT_KEY`: scoped, revocable environment key. The orchestrator uses it to claim work; the worker process uses it to serve one claimed session. Agent-run shell can read worker env vars.
-- `ANTHROPIC_WEBHOOK_SIGNING_KEY`: `whsec_...` secret used by the orchestrator to verify Anthropic webhooks.
-- `BL_API_KEY` and `BL_WORKSPACE`: Blaxel service-account auth for the orchestrator to spawn workers.
-- `ANTHROPIC_AGENT_ID`: Managed Agent id created by `scripts/create_agent.py`; local shell only for example sessions.
-- `ANTHROPIC_AGENT_MODEL`: optional local override used by `scripts/create_agent.py`; default is `claude-opus-4-8`.
-- `BLAXEL_WORKER_PROXY_SECRET_VALUE`: optional public-preview Proxy secret, local shell + orchestrator only; never pass it to the worker process env.
+- `EXAMPLE: PASS` proves deterministic session behavior.
+- The usage receipt proves resolved model, tokens, list cost, and active time.
+- A matching `cma-worker-*` and `ant-run-*` process proves Blaxel attribution.
+- Use one claimant per self-hosted environment during proof.
+- Do not treat transcript success alone as worker attribution.
 
-## Canonical flow
+## Safety
 
-| Step | Command/action | Env handoff | Side effect |
-| --- | --- | --- | --- |
-| 0 | Optional `python3 bootstrap.py --plan` / `python3 bootstrap.py` | bootstrap reads `.env` directly and appends generated ids | guided flow; stops at Console gates; uses default image publish names |
-| 1 | `python3 scripts/preflight.py` | none | external read-only Anthropic access check |
-| 2 | `python3 scripts/create_environment.py` | append printed `ANTHROPIC_ENVIRONMENT_ID` to `.env`, reload env | creates Anthropic environment |
-| 3 | Generate environment key in Anthropic Console | append `ANTHROPIC_ENVIRONMENT_KEY`, reload env | creates scoped environment key |
-| 4 | `(cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox)` | none | publishes `sandbox/cma-worker:latest`; use matching `--name` for custom `BLAXEL_WORKER_IMAGE` |
-| 5 | `python3 scripts/create_agent.py` | append printed `ANTHROPIC_AGENT_ID`, reload env | creates Anthropic agent; set `ANTHROPIC_AGENT_MODEL` first only if needed |
-| 6 | `python3 example/run_session.py --direct-dispatch` | none | creates real session + Blaxel worker sandbox |
-| 7 | `(cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox)` | none | publishes `sandbox/cma-orchestrator:latest`; use matching `--name` for custom `ORCHESTRATOR_IMAGE` |
-| 8 | `python3 setup.py` | register printed webhook URL | creates or updates persistent orchestrator sandbox + preview URL |
-| 9 | Register webhook, export `ANTHROPIC_WEBHOOK_SIGNING_KEY`, rerun `python3 setup.py` | append signing key, reload env | configures webhook verification |
-| 10 | `python3 example/run_session.py` | none | creates real session; webhook dispatches work |
-
-## Proof criteria
-
-- `EXAMPLE: PASS` proves the Anthropic session completed.
-- Worker attribution requires Blaxel proof: `bl get sandbox <cma-worker-sesn-...> process --workspace "$BL_WORKSPACE" -o json` plus `bl logs sandbox <cma-worker-sesn-...> <ant-run-...> --workspace "$BL_WORKSPACE" --period 1h`.
-- Pass criteria: worker sandbox name matches the session id, process name starts `ant-run-`, command is `ant beta:worker run --workdir /workspace`, and logs show this session's `write` and `bash` tool dispatches.
-- Required proof bundle: session id, claimed work id, worker sandbox, worker process, `EXAMPLE: PASS`, process proof showing `ant beta:worker run --workdir /workspace`, and log proof showing the same session/work through `write` and `bash` tool dispatches.
-- Use one active claimant per self-hosted environment. If `workers_polling` or queued work appears, stop the webhook/orchestrator, stop other workers, or use a fresh Anthropic environment before treating the run as proof.
+- Keep `ANTHROPIC_API_KEY` local.
+- The environment key enters the worker and is visible to agent shell commands.
+- File tools stay under `/workspace`; bash remains a shell inside the container.
+- Private previews are the default. Public preview requires `--public-preview`.
+- Every session has a hard budget unless `--no-budget` is explicit.
+- Cleanup is plan-only unless `--apply` is explicit.
+- Cleanup targets one session, worker, and optional Volume. It waits for confirmed absence.
 
 ## Key files
 
-- [README.md](README.md): shortest runnable path.
-- [GUIDE.md](GUIDE.md): narrative source for an integration guide.
-- [AGENTS.md](AGENTS.md): agent orientation.
-- [scripts/](scripts): setup helpers; create scripts print exports and do not mutate `.env`.
-- [orchestrator/app.py](orchestrator/app.py): webhook verify, fast dispatch scheduling, SDK work claiming, worker sandbox/process launch.
-- [orchestrator/blaxel_features.py](orchestrator/blaxel_features.py): optional Volume config and public-preview Proxy config applied to both orchestrator and direct-dispatch worker creation.
-- [worker/Dockerfile](worker/Dockerfile): agent runtime image.
-- [worker/smoke.sh](worker/smoke.sh): command-surface and runtime-version smoke test for the worker image.
-- [example/run_session.py](example/run_session.py): E2E example; `--direct-dispatch` claims exact work locally before webhook registration. After a webhook exists, Anthropic still sends `session.status_run_started`.
-- [example/demo_preview_resume.py](example/demo_preview_resume.py): preview demo; use `--private-preview` for a token-protected Blaxel preview.
-- [example/direct_dispatch.py](example/direct_dispatch.py): direct exact-work dispatcher used by examples; claims work from this machine, the worker still runs in a Blaxel sandbox.
-- [tests/](tests): local tests.
-
-## Invariants
-
-- File tools use relative paths under `/workspace`; bash is still a shell inside the container.
-- Tool results must be non-empty.
-- `ant beta:worker run` uses `keep_alive: True` and a timeout cap.
-- The orchestrator webhook server uses `keep_alive: True` so background dispatch can continue after a fast webhook response.
-- `ant beta:worker run` owns the work heartbeat; the dispatcher collects near-simultaneous session starts, readies scheduled and still-queued session sandboxes before claiming, and then starts exact work promptly.
-- `--max-idle` controls worker exit after the session goes idle with `stop_reason=end_turn`.
-- `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is a lifecycle backstop for abandoned workers, not idle deletion; standby/resume handles ordinary inactivity.
-- Work process names are derived from `work_...` ids plus a unique suffix because Blaxel process records persist after completion and reclaimed work may need a fresh process.
-- `EXAMPLE: PASS` proves transcript completion; Blaxel proof requires a matching `cma-worker-<session>` sandbox with the expected `ant-run-*` process/logs.
-- Use one active work-claiming path per self-hosted environment during proof runs. Direct dispatchers, webhook orchestrators, environment-polling workers, and other cookbook workers all compete for the same Anthropic queue. `example/run_session.py` refuses to create a proof session while queue stats show queued work or active `workers_polling`; if a webhook is still registered, Anthropic can wake another dispatcher after the pre-check.
-- One Anthropic environment per Blaxel workspace: the winning claimant creates the worker with its own Blaxel credentials, so `BL_WORKSPACE` does not pin where a shared environment's work lands. In webhook mode `example/run_session.py` verifies the worker sandbox and reports when another claimant ran it.
-- Proxy secret injection: `BLAXEL_WORKER_PROXY_SECRET_VALUE` is read only by the orchestrator/dispatcher to configure the worker sandbox's network layer. The worker process env never contains it; the proxy injects the credential into outbound requests to `BLAXEL_WORKER_PROXY_DESTINATIONS`.
-- Volume mode is per-session because a Volume can attach to one sandbox at a time. It requires Volume quota and `BL_REGION`, and mounts at `/workspace`.
-- Proxy mode is public preview, region-dependent, and only for outbound application/API calls from the worker, not for replacing `ANTHROPIC_ENVIRONMENT_KEY`.
-
-## Cleanup criteria
-
-- Delete the orchestrator sandbox with `bl delete sandbox "${ORCHESTRATOR_NAME:-cma-orchestrator-app}" --workspace "$BL_WORKSPACE"` when done.
-- Delete leftover `cma-worker-sesn-...` sandboxes only after sessions are inactive.
-- If Volume mode was enabled, delete matching `cma-workspace-sesn-...` Volumes after workers are gone.
-- Proxy config is attached to worker sandbox creation in this cookbook; deleting old test workers is the cleanup for changed Proxy routes, domain filters, and injected secrets. If the workspace exposes separate Proxy secret resources, delete throwaway `BLAXEL_WORKER_PROXY_SECRET_NAME` too.
-- Published sandbox images are intentionally retained for reuse by default; teardown removes runtime resources, not registry artifacts.
-- Disable/delete the Anthropic webhook registered to the Blaxel preview URL, revoke throwaway environment keys, and delete throwaway environments/agents.
-
-## Links
-
-- Anthropic self-hosted sandboxes: https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes
-- Anthropic cloud sandbox reference: https://platform.claude.com/docs/en/managed-agents/cloud-sandboxes-reference
-- Anthropic Managed Agents overview: https://platform.claude.com/docs/en/managed-agents/overview
-- Blaxel docs: https://docs.blaxel.ai
+- `example/session_runtime.py`: streaming, pagination, budgets, errors, timeouts, receipts.
+- `example/run_session.py`: verified hello, advisor, and skill scenarios.
+- `orchestrator/app.py`: signed webhook, bounded dispatch, recovery, health, readiness.
+- `worker/Dockerfile`: quickstart and full profiles.
+- `cookbook.py`: status and exact cleanup.
+- `GUIDE.md`: production design, security, operations, and troubleshooting.

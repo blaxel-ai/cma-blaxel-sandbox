@@ -19,7 +19,7 @@ async def test_dispatch_available_work_only_prewarms_still_queued_sessions(monke
     class FakeWorkAPI:
         async def list(self, environment_id, limit):
             assert environment_id == "env_test"
-            assert limit == 50
+            assert limit == 100
             return SimpleNamespace(data=[
                 _session_work("sesn_queued", "queued"),
                 _session_work("sesn_stale_active", "active"),
