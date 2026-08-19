@@ -33,6 +33,65 @@ async def test_cleanup_plan_does_not_call_external_apis(monkeypatch, capsys):
     assert "cma-worker-sesn-123" in output
 
 
+async def test_cleanup_waits_for_interrupt_to_settle_before_deleting_worker(monkeypatch):
+    timeline = []
+    states = iter(("running", "rescheduling", "idle"))
+
+    async def retrieve(session_id):
+        state = next(states)
+        timeline.append(f"retrieve:{state}")
+        return {"id": session_id, "status": state}
+
+    async def send(session_id, *, events):
+        timeline.append("interrupt")
+
+    async def no_sleep(_):
+        timeline.append("sleep")
+
+    async def delete_if_present(delete, get, name, *, timeout_seconds):
+        timeline.append(f"delete:{name}")
+        return "deleted"
+
+    async def archive(session_id):
+        timeline.append(f"archive:{session_id}")
+
+    client = SimpleNamespace(
+        beta=SimpleNamespace(
+            sessions=SimpleNamespace(
+                retrieve=retrieve,
+                events=SimpleNamespace(send=send),
+                archive=archive,
+            ),
+        ),
+    )
+    monkeypatch.setattr(cookbook, "_load_dotenv", lambda: None)
+    monkeypatch.setattr(cookbook, "AsyncAnthropic", lambda: client)
+    monkeypatch.setattr(cookbook.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(cookbook, "_delete_if_present", delete_if_present)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("BL_WORKSPACE", "test")
+    args = cookbook.parse_args([
+        "cleanup",
+        "--session",
+        "sesn_123",
+        "--interrupt",
+        "--apply",
+    ])
+
+    await cookbook.cleanup(args)
+
+    assert timeline == [
+        "retrieve:running",
+        "interrupt",
+        "retrieve:rescheduling",
+        "sleep",
+        "retrieve:idle",
+        "delete:cma-worker-sesn-123",
+        "delete:cma-workspace-sesn-123",
+        "archive:sesn_123",
+    ]
+
+
 async def test_wait_until_missing_waits_through_a_tombstone(monkeypatch):
     calls = 0
 

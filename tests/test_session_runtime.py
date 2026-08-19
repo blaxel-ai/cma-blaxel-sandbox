@@ -25,7 +25,15 @@ class FakeStream(AsyncItems):
         return False
 
 
-def fake_client(*, stream_events=None, baseline=None, history=None, stream_error=None, stats=None):
+def fake_client(
+    *,
+    stream_events=None,
+    baseline=None,
+    history=None,
+    history_batches=None,
+    stream_error=None,
+    stats=None,
+):
     sent = []
     updates = []
 
@@ -42,7 +50,13 @@ def fake_client(*, stream_events=None, baseline=None, history=None, stream_error
     async def list_events(session_id, **kwargs):
         nonlocal history_calls
         history_calls += 1
-        items = (baseline or []) if history_calls == 1 else (history or [])
+        if history_calls == 1:
+            items = baseline or []
+        elif history_batches is not None:
+            index = min(history_calls - 2, len(history_batches) - 1)
+            items = history_batches[index]
+        else:
+            items = history or []
         return AsyncItems(items)
 
     async def update(session_id, **kwargs):
@@ -156,6 +170,54 @@ async def test_run_turn_can_raise_a_reached_budget_once():
     runtime = session_runtime.ManagedSessionRuntime(client, poll_seconds=0)
     result = await runtime.run_turn("sesn_x", "hello", resume_budget_cents=250)
     assert result.stop_reason == "end_turn"
+    assert updates == [("sesn_x", {"budget": session_runtime.session_budget(250)})]
+
+
+async def test_budget_resume_reconciliation_waits_for_new_idle_event():
+    budget = {
+        "id": "budget",
+        "type": "session.status_idle",
+        "stop_reason": {"type": "budget_reached"},
+    }
+    done = {
+        "id": "done",
+        "type": "session.status_idle",
+        "stop_reason": {"type": "end_turn"},
+    }
+    client, _, updates = fake_client(
+        stream_error=RuntimeError("disconnect"),
+        history_batches=[[budget], [budget, done]],
+    )
+    runtime = session_runtime.ManagedSessionRuntime(client, poll_seconds=0)
+
+    result = await runtime.run_turn("sesn_x", "hello", resume_budget_cents=250)
+
+    assert result.stop_reason == "end_turn"
+    assert result.events == [budget, done]
+    assert updates == [("sesn_x", {"budget": session_runtime.session_budget(250)})]
+
+
+async def test_budget_resume_returns_if_the_larger_budget_is_also_reached():
+    first_budget = {
+        "id": "budget-one",
+        "type": "session.status_idle",
+        "stop_reason": {"type": "budget_reached"},
+    }
+    second_budget = {
+        "id": "budget-two",
+        "type": "session.status_idle",
+        "stop_reason": {"type": "budget_reached"},
+    }
+    client, _, updates = fake_client(
+        stream_error=RuntimeError("disconnect"),
+        history_batches=[[first_budget], [first_budget, second_budget]],
+    )
+    runtime = session_runtime.ManagedSessionRuntime(client, poll_seconds=0)
+
+    result = await runtime.run_turn("sesn_x", "hello", resume_budget_cents=250)
+
+    assert result.stop_reason == "budget_reached"
+    assert result.events == [first_budget, second_budget]
     assert updates == [("sesn_x", {"budget": session_runtime.session_budget(250)})]
 
 
