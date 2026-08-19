@@ -48,6 +48,14 @@ def event_type(event: Any) -> str:
     return str(as_dict(event).get("type") or "")
 
 
+def _budget_event_key(event: Any, occurrence: int = 1) -> str:
+    """Identify one budget idle event across stream and paginated history reads."""
+    item = as_dict(event)
+    if event_id := item.get("id"):
+        return f"id:{event_id}"
+    return f"body:{json.dumps(item, sort_keys=True, default=str)}#{occurrence}"
+
+
 def idle_stop_reason(events: list[Any]) -> str | None:
     reason = None
     for event in events:
@@ -231,6 +239,7 @@ class ManagedSessionRuntime:
         budget_raised: bool,
         seen_ids: set[str],
         baseline_ids: set[str],
+        handled_budget_events: set[str],
         stall_timeout_seconds: float | None,
     ) -> tuple[list[Any], str, bool]:
         last_count = -1
@@ -262,13 +271,28 @@ class ManagedSessionRuntime:
             ]
             await self._raise_for_errors(turn_events)
             reason = idle_stop_reason(turn_events)
-            if reason == "budget_reached" and resume_budget_cents and not budget_raised:
-                await self.client.beta.sessions.update(
-                    session_id,
-                    budget=session_budget(resume_budget_cents),
-                )
-                budget_raised = True
-                print(f"  budget raised to {resume_budget_cents} cents; session resumed")
+            if reason == "budget_reached":
+                budget_events = [
+                    event
+                    for event in turn_events
+                    if event_type(event) == "session.status_idle"
+                    and (as_dict(event).get("stop_reason") or {}).get("type") == reason
+                ]
+                budget_event = budget_events[-1]
+                key = _budget_event_key(budget_event, len(budget_events))
+                if key in handled_budget_events:
+                    await asyncio.sleep(self.poll_seconds)
+                    continue
+                if resume_budget_cents and not budget_raised:
+                    await self.client.beta.sessions.update(
+                        session_id,
+                        budget=session_budget(resume_budget_cents),
+                    )
+                    budget_raised = True
+                    handled_budget_events.add(key)
+                    print(f"  budget raised to {resume_budget_cents} cents; session resumed")
+                else:
+                    return events, reason, budget_raised
             elif reason:
                 return events, reason, budget_raised
             await asyncio.sleep(self.poll_seconds)
@@ -291,6 +315,8 @@ class ManagedSessionRuntime:
         sent = False
         budget_raised = False
         seen_ids: set[str] = set()
+        handled_budget_events: set[str] = set()
+        stream_budget_occurrences = 0
         dispatch_task: asyncio.Task | None = None
         dispatch_result = None
 
@@ -346,6 +372,10 @@ class ManagedSessionRuntime:
                                     budget=session_budget(resume_budget_cents),
                                 )
                                 budget_raised = True
+                                stream_budget_occurrences += 1
+                                handled_budget_events.add(
+                                    _budget_event_key(item, stream_budget_occurrences)
+                                )
                                 print(f"  budget raised to {resume_budget_cents} cents; session resumed")
                                 continue
                             if reason:
@@ -367,6 +397,7 @@ class ManagedSessionRuntime:
                     budget_raised=budget_raised,
                     seen_ids=seen_ids,
                     baseline_ids=baseline_ids,
+                    handled_budget_events=handled_budget_events,
                     stall_timeout_seconds=stall_timeout_seconds,
                 )
                 if dispatch_task:

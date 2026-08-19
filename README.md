@@ -4,8 +4,6 @@
   <img src="assets/cma-blaxel-sandbox-15s.gif" alt="Claude Managed Agents running work in a Blaxel sandbox" width="960">
 </p>
 
-<p align="center"><a href="assets/cma-blaxel-sandbox-15s-uhd.mp4">Watch the 4K MP4</a> · silent 15-second explainer</p>
-
 Claude Managed Agents (CMA) lets you define a reusable agent, equip it with tools and session state, start work from application events, and run each session in an isolated Blaxel sandbox with a concrete result and traceable lifecycle.
 
 Run Anthropic's hosted agent loop with tool execution in isolated Blaxel sandboxes. This cookbook gives you a verified worker, a webhook orchestrator, safe cost controls, live event output, and exact cleanup.

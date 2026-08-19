@@ -22,8 +22,10 @@ def test_public_docs_do_not_offer_unsupported_self_hosted_resources():
 
 
 def test_readme_embeds_the_checked_in_architecture_image():
-    assert "assets/cma-blaxel-sandbox-flow.png" in read("README.md")
+    readme = read("README.md")
+    assert "assets/cma-blaxel-sandbox-flow.png" in readme
     assert (ROOT / "assets" / "cma-blaxel-sandbox-flow.png").is_file()
+    assert "Watch the 4K MP4" not in readme
 
 
 def test_docs_show_plan_before_cleanup_apply():

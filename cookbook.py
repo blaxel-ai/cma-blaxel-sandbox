@@ -59,6 +59,26 @@ async def wait_until_missing(
     raise TimeoutError(f"resource {name!r} still exists after {timeout_seconds:g}s")
 
 
+async def wait_until_session_settled(
+    get_session: Callable[[str], Awaitable[Any]],
+    session_id: str,
+    *,
+    timeout_seconds: float = 120,
+    poll_seconds: float = 2,
+) -> str:
+    """Wait until an interrupted session is no longer actively executing."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        session = as_dict(await get_session(session_id))
+        state = str(session.get("status") or "unknown")
+        if state in {"idle", "terminated"}:
+            return state
+        await asyncio.sleep(poll_seconds)
+    raise TimeoutError(
+        f"session {session_id!r} still active after {timeout_seconds:g}s"
+    )
+
+
 async def _all_blaxel(page: Any) -> list[Any]:
     if hasattr(page, "auto_paging_iter"):
         return [item async for item in page.auto_paging_iter()]
@@ -205,6 +225,12 @@ async def cleanup(args: argparse.Namespace) -> None:
             events=[{"type": "user.interrupt"}],
         )
         print("session: interrupt sent")
+        settled_state = await wait_until_session_settled(
+            client.beta.sessions.retrieve,
+            args.session,
+            timeout_seconds=args.wait_seconds,
+        )
+        print(f"session: interrupt settled ({settled_state})")
 
     print(
         "sandbox:",
