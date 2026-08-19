@@ -6,6 +6,7 @@ directly so no reload is needed, and append-without-duplication so resources are
 never double-created on re-run. Subprocess wiring is intentionally not exercised.
 """
 import bootstrap
+import pytest
 
 
 # --- decide(): the credential state determines the single next step ---------
@@ -94,3 +95,11 @@ def test_append_export_creates_file_when_missing(tmp_path):
     env_file = tmp_path / ".env"
     assert bootstrap.append_export(env_file, "ANTHROPIC_ENVIRONMENT_ID", "env_first") is True
     assert env_file.read_text() == "export ANTHROPIC_ENVIRONMENT_ID=env_first\n"
+
+
+def test_finalize_stops_when_the_final_webhook_proof_fails(monkeypatch):
+    results = iter([0, 1])
+    monkeypatch.setattr(bootstrap, "_run", lambda *args, **kwargs: next(results))
+
+    with pytest.raises(SystemExit):
+        bootstrap._do_finalize({})

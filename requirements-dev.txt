@@ -1,6 +1,6 @@
 # Test/dev dependencies. The tests import the orchestrator (orchestrator/app.py),
 # so its runtime deps are required too -- pulled in via the -r line below.
-#   python3 -m pip install -r requirements-dev.txt && python3 -m pytest
+#   python3 -m pip install --require-hashes -r requirements-dev.lock && python3 -m pytest
 -r orchestrator/requirements.txt
 httpx2>=2.0.0        # FastAPI TestClient transport
 pytest>=9.1.1

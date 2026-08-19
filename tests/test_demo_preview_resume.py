@@ -29,14 +29,20 @@ def test_preview_token_headers_only_set_for_private_token():
     }
 
 
-def test_parse_args_defaults_to_public_preview():
+def test_parse_args_defaults_to_private_preview():
     args = demo_preview_resume.parse_args([])
 
-    assert args.private_preview is False
+    assert args.public_preview is False
     assert args.preview_token_ttl_minutes == 10
     assert args.print_preview_token is False
+    assert args.budget_cents == 100
 
 
-def test_parse_args_validates_positive_private_preview_ttl():
-    with pytest.raises(SystemExit, match="greater than 0"):
-        demo_preview_resume.parse_args(["--private-preview", "--preview-token-ttl-minutes", "0"])
+def test_parse_args_public_preview_is_explicit():
+    assert demo_preview_resume.parse_args(["--public-preview"]).public_preview is True
+
+
+def test_parse_args_validates_positive_private_preview_ttl(capsys):
+    with pytest.raises(SystemExit):
+        demo_preview_resume.parse_args(["--preview-token-ttl-minutes", "0"])
+    assert "greater than 0" in capsys.readouterr().err

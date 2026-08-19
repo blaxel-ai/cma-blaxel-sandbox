@@ -1,93 +1,52 @@
 #!/usr/bin/env python3
-"""Run an example Claude Managed Agents session against the Blaxel self-hosted worker.
+"""Run one verified Claude Managed Agents turn on a Blaxel worker."""
+from __future__ import annotations
 
-Normal flow (webhook wired): create a session + send a message; the orchestrator
-receives the `session.status_run_started` webhook and spawns a worker automatically.
-
-For testing WITHOUT a webhook, pass --direct-dispatch to spawn the worker directly
-from here after claiming its exact work item with the SDK.
-
-Set these in your shell first:
-    ANTHROPIC_API_KEY          your Anthropic API key (control-plane calls)
-    ANTHROPIC_ENVIRONMENT_ID   env_...   (from step 1)
-    ANTHROPIC_AGENT_ID         agent_... (the agent you created)
-For --direct-dispatch, also:
-    ANTHROPIC_ENVIRONMENT_KEY  sk-ant-oat01-...  (the worker's queue auth)
-    BL_API_KEY, BL_WORKSPACE   so the Blaxel SDK can spawn the worker sandbox
-    BL_REGION                  optional, e.g. us-pdx-1
-"""
-import argparse, asyncio, json, os, urllib.request, urllib.error
+import argparse
+import asyncio
+import json
+import os
+from typing import Any
 
 from blaxel.core import SandboxInstance
+
 from direct_dispatch import BlaxelFeatureSetupError, dispatch_until_session_work, worker_name
+from session_runtime import (
+    DEFAULT_BUDGET_CENTS,
+    ManagedSessionRuntime,
+    SessionExecutionError,
+    SessionTimeoutError,
+    as_dict,
+    final_agent_text,
+    idle_stop_count,
+    idle_stop_reason,
+    print_receipt,
+    session_budget,
+    tool_errors,
+)
 
-BASE = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-
-
-def _headers():
-    return {
-        "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": "managed-agents-2026-04-01",
-        "content-type": "application/json",
-    }
-
-
-def api(method, path, body=None):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data, headers=_headers(), method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return r.status, json.loads(r.read().decode() or "{}")
-    except urllib.error.HTTPError as e:
-        return e.code, {"_error": e.read().decode()[:300]}
-
-
-def require_api(method, path, body=None):
-    status, payload = api(method, path, body)
-    if not (200 <= status < 300):
-        raise SystemExit(f"{method} {path} failed ({status}): {json.dumps(payload)[:500]}")
-    return payload
+HELLO_MESSAGE = (
+    "Do not use an absolute path with the write tool. Call the write tool with "
+    "file_path exactly hello.txt and content exactly 'hello from blaxel'. Then run "
+    "`cat /workspace/hello.txt` and finish with exactly BLAXEL_CMA_OK."
+)
+ADVISOR_MESSAGE = (
+    "Ask your configured advisor to compare two safe ways to implement a bounded "
+    "Python worker pool. Use the advice, write a short decision to advisor-proof.txt, "
+    "read it back, and finish with exactly BLAXEL_ADVISOR_OK."
+)
 
 
-def events(sid):
-    return require_api("GET", f"/v1/sessions/{sid}/events").get("data") or []
-
-
-def queue_stats():
-    """Current work-queue stats for the configured self-hosted environment."""
-    return require_api("GET", f"/v1/environments/{os.environ['ANTHROPIC_ENVIRONMENT_ID']}/work/stats")
-
-
-def queue_pending():
-    """depth + pending in the environment's work queue (0 == nothing waiting)."""
-    d = queue_stats()
-    return (d.get("depth") or 0) + (d.get("pending") or 0)
-
-
-def require_quiet_proof_environment():
-    """Fail before creating a proof session if another worker can steal it."""
-    stats = queue_stats()
-    depth = stats.get("depth") or 0
-    pending = stats.get("pending") or 0
-    workers_polling = stats.get("workers_polling") or 0
-    if depth or pending or workers_polling:
-        raise SystemExit(
-            "example proof requires a quiet self-hosted environment "
-            f"(depth={depth}, pending={pending}, workers_polling={workers_polling}). "
-            "Stop any environment-polling worker, webhook dispatcher, or other cookbook "
-            "worker using this environment, or create a fresh environment, then rerun."
-        )
+def skill_message(skill_name: str) -> str:
+    return (
+        f"Use the configured skill {skill_name!r}. Read its SKILL.md before applying it. "
+        "Write one useful result to skill-proof.txt, read it back, and finish with "
+        "exactly BLAXEL_SKILL_OK."
+    )
 
 
 async def worker_sandbox_lookup(sandbox_name: str) -> tuple[str, object | None]:
-    """Look up the worker sandbox with this shell's BL credentials.
-
-    Returns (status, sandbox). Status is "found", "missing" (a definitive
-    not-found, so another claimant ran the work), or "unknown" (auth/network
-    failure: the lookup proves nothing). Works with BL_API_KEY or an existing
-    `bl login` session.
-    """
+    """Return found, missing, or unknown without turning auth errors into proof."""
     try:
         return "found", await SandboxInstance.get(sandbox_name)
     except Exception as exc:
@@ -98,12 +57,15 @@ async def worker_sandbox_lookup(sandbox_name: str) -> tuple[str, object | None]:
 
 
 async def ant_run_process_name(sandbox) -> str | None:
-    """Name of the worker's `ant-run-*` process, if one is visible."""
     try:
         processes = await sandbox.process.list()
     except Exception:
         return None
-    names = [name for p in processes if (name := getattr(p, "name", "") or "").startswith("ant-run-")]
+    names = [
+        name
+        for process in processes
+        if (name := getattr(process, "name", "") or "").startswith("ant-run-")
+    ]
     return names[-1] if names else None
 
 
@@ -121,129 +83,208 @@ def claimed_elsewhere_lines(sandbox_name: str, workspace: str) -> list[str]:
     return [
         "",
         f"NOTE: worker sandbox {sandbox_name} was NOT found in workspace {workspace}.",
-        "The transcript passed, so another claimant on this Anthropic environment",
-        "(a registered webhook orchestrator or another dispatcher) ran the worker in",
-        "its own Blaxel workspace. BL_WORKSPACE does not pin where shared-environment",
-        "work lands: use one Anthropic environment per Blaxel workspace, or rerun with",
-        "--direct-dispatch on an environment that only this workspace claims.",
+        "Another claimant on this Anthropic environment ran the successful turn.",
+        "Use one Anthropic environment per Blaxel workspace for attributable proof,",
+        "or use --direct-dispatch in a quiet environment.",
     ]
 
 
-def has_end_turn(items):
-    for event in items:
-        stop_reason = event.get("stop_reason") or {}
-        if event.get("type") == "session.status_idle" and stop_reason.get("type") == "end_turn":
-            return True
-    return False
+def _tool_uses(events: list[Any]) -> list[dict[str, Any]]:
+    return [as_dict(event) for event in events if as_dict(event).get("type") == "agent.tool_use"]
 
 
-async def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--message", default=(
-        "Important: do not use any absolute path with the write tool. First, call the write tool "
-        "with file_path exactly hello.txt and content exactly 'hello from blaxel'. Then run the "
-        "shell command 'cat /workspace/hello.txt' and report its output."))
-    ap.add_argument("--direct-dispatch", action="store_true",
-                    help="spawn the worker directly instead of relying on the webhook + orchestrator")
-    args = ap.parse_args()
+def _scenario_verdict(
+    scenario: str,
+    events: list[Any],
+    final: str,
+    *,
+    advisor_threads: list[Any] | None = None,
+) -> tuple[bool, dict[str, bool]]:
+    uses = _tool_uses(events)
+    errors = tool_errors(events)
+    checks: dict[str, bool] = {
+        "no_tool_errors": not errors,
+        "end_turn": idle_stop_reason(events) == "end_turn",
+    }
+    if scenario == "hello":
+        checks.update({
+            "write_tool": any(
+                item.get("name") == "write" and "hello.txt" in json.dumps(item.get("input"))
+                for item in uses
+            ),
+            "bash_tool": any(
+                item.get("name") == "bash" and "/workspace/hello.txt" in json.dumps(item.get("input"))
+                for item in uses
+            ),
+            "final_marker": "BLAXEL_CMA_OK" in final,
+        })
+    elif scenario == "advisor":
+        checks.update({
+            "advisor_thread": any(
+                (as_dict(thread).get("agent") or {}).get("type") == "advisor"
+                for thread in advisor_threads or []
+            ),
+            "proof_file": any(
+                "advisor-proof.txt" in json.dumps(item.get("input")) for item in uses
+            ),
+            "final_marker": "BLAXEL_ADVISOR_OK" in final,
+        })
+    elif scenario == "skill":
+        checks.update({
+            "skill_read": any(
+                item.get("name") == "read" and "SKILL.md" in json.dumps(item.get("input"))
+                for item in uses
+            ),
+            "proof_file": any(
+                "skill-proof.txt" in json.dumps(item.get("input")) for item in uses
+            ),
+            "final_marker": "BLAXEL_SKILL_OK" in final,
+        })
+    return all(checks.values()), checks
 
-    for _req in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_AGENT_ID"):
-        if not os.environ.get(_req):
-            raise SystemExit(f"missing required env: {_req}")
-    if args.direct_dispatch:
-        for _req in ("ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"):
-            if not os.environ.get(_req):
-                raise SystemExit(f"missing required env: {_req}")
-    require_quiet_proof_environment()
 
-    sess = require_api("POST", "/v1/sessions",
-                       {"agent": os.environ["ANTHROPIC_AGENT_ID"], "environment_id": os.environ["ANTHROPIC_ENVIRONMENT_ID"]})
-    sid = sess.get("id")
-    if not sid:
-        raise SystemExit(f"session create failed: {sess}")
-    print("session:", sid)
-    require_api("POST", f"/v1/sessions/{sid}/events",
-                {"events": [{"type": "user.message", "content": [{"type": "text", "text": args.message}]}]})
-    print("message sent")
-
-    dispatched = None
-    if args.direct_dispatch:
-        dispatched = await dispatch_until_session_work(sid)
-
-    # A CMA session reports status "idle" even while a turn is mid-flight, so we
-    # can't watch status alone. Watch the work queue + transcript: the turn is done
-    # once the worker has actually picked up work (queue went non-empty, or a tool
-    # result posted), the queue has drained, and the transcript stops growing. This
-    # also keeps us from declaring "done" before a cold worker even claims.
-    started = False; prev = -1; stable = 0
-    for i in range(72):  # up to ~6 min
-        s = require_api("GET", f"/v1/sessions/{sid}")
-        st = s.get("status")
-        items = events(sid)
-        n = len(items)
-        pending = queue_pending()
-        if pending > 0 or any(e.get("type") in ("agent.tool_use", "user.tool_result", "agent.tool_result") for e in items):
-            started = True
-        stable = stable + 1 if n == prev else 0
-        prev = n
-        print(f"  t={i*5:3d}s status={st} events={n} queue={pending}")
-        if st == "terminated":
-            break
-        if started and pending == 0 and has_end_turn(items) and stable >= 1:
-            break
-        await asyncio.sleep(5)
-
-    items = events(sid)
-    tool_errors = []
-    has_write = False
-    has_bash = False
-    for e in items:
-        if e.get("type") == "agent.tool_use":
-            print("  tool:", e.get("name"), json.dumps(e.get("input"))[:80])
-            payload = json.dumps(e.get("input"))
-            has_write = has_write or (e.get("name") == "write" and "hello.txt" in payload)
-            has_bash = has_bash or (e.get("name") == "bash" and "/workspace/hello.txt" in payload)
-        if e.get("type") in ("user.tool_result", "agent.tool_result") and e.get("is_error"):
-            print("  ERROR:", json.dumps(e.get("content"))[:140])
-            tool_errors.append(e)
-    msgs = [e for e in items if e.get("type") == "agent.message"]
-    final = json.dumps(msgs[-1].get("content")) if msgs else ""
-    if msgs:
-        print("\nfinal agent message:", final[:400])
-
-    ok = (
-        started
-        and not tool_errors
-        and has_write
-        and has_bash
-        and "hello from blaxel" in final.lower()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--scenario",
+        choices=("hello", "advisor", "skill"),
+        default="hello",
+        help="verified cookbook scenario to run",
     )
-    if not ok:
+    parser.add_argument("--message", help="override the scenario prompt; scenario checks still apply")
+    parser.add_argument("--skill-name", help="skill name or purpose for --scenario skill")
+    parser.add_argument(
+        "--direct-dispatch",
+        action="store_true",
+        help="spawn the worker directly instead of using the webhook orchestrator",
+    )
+    budget = parser.add_mutually_exclusive_group()
+    budget.add_argument(
+        "--budget-cents",
+        type=int,
+        default=DEFAULT_BUDGET_CENTS,
+        help=f"hard list-cost ceiling in USD cents (default: {DEFAULT_BUDGET_CENTS})",
+    )
+    budget.add_argument(
+        "--no-budget",
+        action="store_true",
+        help="create the session without a hard budget; use only when intentional",
+    )
+    parser.add_argument(
+        "--resume-budget-cents",
+        type=int,
+        help="raise a reached budget once to this larger ceiling",
+    )
+    parser.add_argument("--timeout-seconds", type=float, default=360)
+    args = parser.parse_args(argv)
+    if not args.no_budget and args.budget_cents <= 0:
+        parser.error("--budget-cents must be greater than zero")
+    if args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be greater than zero")
+    if args.resume_budget_cents is not None:
+        if args.no_budget:
+            parser.error("--resume-budget-cents cannot be used with --no-budget")
+        if args.resume_budget_cents <= args.budget_cents:
+            parser.error("--resume-budget-cents must exceed --budget-cents")
+    if args.scenario == "skill" and not args.skill_name:
+        parser.error("--scenario skill requires --skill-name")
+    return args
+
+
+async def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    required = ["ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_AGENT_ID"]
+    if args.direct_dispatch:
+        required.extend(["ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"])
+    for name in required:
+        if not os.environ.get(name):
+            raise SystemExit(f"missing required env: {name}")
+
+    messages = {
+        "hello": HELLO_MESSAGE,
+        "advisor": ADVISOR_MESSAGE,
+        "skill": skill_message(args.skill_name or ""),
+    }
+    runtime = ManagedSessionRuntime()
+    environment_id = os.environ["ANTHROPIC_ENVIRONMENT_ID"]
+    try:
+        await runtime.require_quiet_environment(environment_id)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    budget_cents = None if args.no_budget else args.budget_cents
+    session = await runtime.create_session(
+        agent_id=os.environ["ANTHROPIC_AGENT_ID"],
+        environment_id=environment_id,
+        budget_cents=budget_cents,
+        metadata={"cookbook": "blaxel-cma", "scenario": args.scenario},
+        title=f"Blaxel CMA: {args.scenario}",
+    )
+    session_id = as_dict(session).get("id")
+    if not session_id:
+        raise SystemExit("session create response did not include an id")
+    print(f"session: {session_id}")
+    print(f"budget: {'disabled' if budget_cents is None else f'{budget_cents} cents'}")
+
+    async def dispatch():
+        return await dispatch_until_session_work(session_id)
+
+    run = await runtime.run_turn(
+        session_id,
+        args.message or messages[args.scenario],
+        timeout_seconds=args.timeout_seconds,
+        resume_budget_cents=args.resume_budget_cents,
+        on_started=dispatch if args.direct_dispatch else None,
+    )
+    final = final_agent_text(run.events)
+    if final:
+        print(f"\nFinal agent message:\n{final[:1200]}")
+
+    if run.stop_reason == "budget_reached":
         raise SystemExit(
-            "EXAMPLE: FAIL "
-            f"(started={started}, write={has_write}, bash={has_bash}, "
-            f"errors={len(tool_errors)}, final_contains_hello={'hello from blaxel' in final.lower()})"
+            "EXAMPLE: BUDGET REACHED. Raise the existing budget with "
+            "--resume-budget-cents, or choose a larger initial ceiling."
         )
+    if run.stop_reason in {"requires_action", "retries_exhausted"}:
+        raise SystemExit(f"EXAMPLE: FAIL (stop_reason={run.stop_reason})")
+
+    advisor_threads = await runtime.all_threads(session_id) if args.scenario == "advisor" else []
+    ok, checks = _scenario_verdict(
+        args.scenario,
+        run.events,
+        final,
+        advisor_threads=advisor_threads,
+    )
+    print("\nVerification:")
+    for name, passed in checks.items():
+        print(f"  {'PASS' if passed else 'FAIL'}  {name}")
+    if not ok:
+        raise SystemExit("EXAMPLE: FAIL")
     print("\nEXAMPLE: PASS")
+    print_receipt(await runtime.receipt(session_id))
+
     workspace = os.environ.get("BL_WORKSPACE")
     if not workspace:
         return
-    if dispatched:
-        # Direct dispatch holds the actual worker instance; the proof is real.
-        print("\n".join(proof_lines(dispatched.sandbox_name, dispatched.process_name, workspace)))
+    if run.dispatch_result:
+        print("\n".join(proof_lines(
+            run.dispatch_result.sandbox_name,
+            run.dispatch_result.process_name,
+            workspace,
+        )))
         return
-    lookup, sandbox = await worker_sandbox_lookup(worker_name(sid))
+    lookup, sandbox = await worker_sandbox_lookup(worker_name(session_id))
     if lookup == "missing":
-        print("\n".join(claimed_elsewhere_lines(worker_name(sid), workspace)))
+        print("\n".join(claimed_elsewhere_lines(worker_name(session_id), workspace)))
         return
-    process_name = (await ant_run_process_name(sandbox)) if sandbox else None
-    print("\n".join(proof_lines(worker_name(sid), process_name or "ant-run-...", workspace)))
+    process_name = await ant_run_process_name(sandbox) if sandbox else None
+    print("\n".join(proof_lines(worker_name(session_id), process_name or "ant-run-...", workspace)))
     if lookup == "unknown":
-        print("  (unverified: the sandbox lookup failed; check BL_API_KEY or `bl login`)")
+        print("  unverified: sandbox lookup failed; check BL_API_KEY or bl login")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except BlaxelFeatureSetupError as exc:
-        raise SystemExit(f"setup error: {exc}") from None
+    except (BlaxelFeatureSetupError, SessionExecutionError, SessionTimeoutError) as exc:
+        raise SystemExit(f"runtime error: {exc}") from None

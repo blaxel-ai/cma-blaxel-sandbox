@@ -20,7 +20,10 @@ long-lived sandbox process and resumes with the sandbox on the next inbound
 webhook.
 """
 import asyncio
+import json
 import os
+import urllib.error
+import urllib.request
 from uuid import uuid4
 
 from blaxel.core import SandboxInstance
@@ -52,6 +55,9 @@ PASSTHROUGH = [
     "BLAXEL_WORKER_READY_ATTEMPTS",
     "BLAXEL_WORKER_READY_SLEEP",
     "ANT_RUN_START_ATTEMPTS",
+    "ANT_MAX_CONCURRENT_WORKER_STARTS",
+    "ANT_DISPATCHER_ATTEMPTS",
+    "ANT_DISPATCHER_RECOVERY_SECONDS",
     "BLAXEL_WORKER_PROXY_ALLOWED_DOMAINS",
     "BLAXEL_WORKER_PROXY_FORBIDDEN_DOMAINS",
     "BLAXEL_WORKER_PROXY_BYPASS",
@@ -66,6 +72,41 @@ PASSTHROUGH = [
     "BLAXEL_WORKER_VOLUME_SIZE_MB",
     "BLAXEL_WORKER_VOLUME_MOUNT",
 ]
+
+
+def _normalize_url(url: str) -> str:
+    if url.startswith("//"):
+        url = "https:" + url
+    elif url and not url.startswith("http"):
+        url = "https://" + url
+    return url.rstrip("/")
+
+
+def _get_json(url: str, timeout: float = 15) -> tuple[int, dict]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.status, json.loads(response.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read().decode() or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        return exc.code, payload
+
+
+async def _wait_for_http(url: str, *, attempts: int = 12) -> dict:
+    last = None
+    for attempt in range(attempts):
+        try:
+            status, payload = await asyncio.to_thread(_get_json, url)
+            last = (status, payload)
+            if status == 200:
+                return payload
+        except Exception as exc:
+            last = exc
+        if attempt + 1 < attempts:
+            await asyncio.sleep(2)
+    raise RuntimeError(f"endpoint did not become ready: {url} ({last!r})")
 
 
 def _orchestrator_sandbox_body(envs: list[dict]) -> dict:
@@ -128,8 +169,8 @@ async def _restart_webhook_server(sbx, env_map: dict) -> str:
     its config at import time. So when you add ANTHROPIC_WEBHOOK_SIGNING_KEY and
     re-run setup, the old server would keep rejecting deliveries with 503. We
     kill the old server and start a fresh one with the env passed at the PROCESS
-    level too. We keep the stable sandbox name so its public preview URL --
-    already registered as the Anthropic webhook -- stays stable.
+    level too. We keep the stable sandbox name so its public preview URL,
+    already registered as the Anthropic webhook, stays stable.
     """
     try:
         for proc in await sbx.process.list():
@@ -186,15 +227,15 @@ async def main() -> None:
         "metadata": {"name": "webhook"},
         "spec": {"port": PORT, "public": True},
     })
-    url = getattr(preview.spec, "url", None)
-    if url and url.startswith("//"):
-        url = "https:" + url
-    if url and not url.startswith("http"):
-        url = "https://" + url
+    url = _normalize_url(getattr(preview.spec, "url", None) or "")
+    health = await _wait_for_http(f"{url}/health")
+    print(f"health check: {health.get('status', 'unknown')}")
     if os.environ.get("ANTHROPIC_WEBHOOK_SIGNING_KEY"):
-        print("\nsigning key: configured — deliveries will be verified")
+        readiness = await _wait_for_http(f"{url}/ready")
+        print(f"readiness check: {readiness.get('status', 'unknown')}")
+        print("\nsigning key: configured; deliveries will be verified")
     else:
-        print("\nsigning key: NOT set — deliveries will be rejected with 503 until you")
+        print("\nsigning key: NOT set; deliveries will be rejected with 503 until you")
         print("re-run setup with ANTHROPIC_WEBHOOK_SIGNING_KEY exported")
     print("\n=== Register this as the Anthropic webhook URL ===")
     print(f"  {url}/webhook")

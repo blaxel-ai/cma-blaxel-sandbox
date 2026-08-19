@@ -1,6 +1,7 @@
 import importlib
 import pathlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,49 +11,58 @@ sys.path.insert(0, str(ROOT / "example"))
 run_session = importlib.import_module("run_session")
 
 
-def test_proof_preflight_allows_quiet_environment(monkeypatch):
-    monkeypatch.setattr(
-        run_session,
-        "queue_stats",
-        lambda: {"depth": 0, "pending": 0, "workers_polling": 0},
+def test_default_run_has_a_one_dollar_hard_budget():
+    args = run_session.parse_args([])
+    assert args.scenario == "hello"
+    assert args.budget_cents == 100
+    assert args.no_budget is False
+
+
+def test_no_budget_requires_an_explicit_flag():
+    args = run_session.parse_args(["--no-budget"])
+    assert args.no_budget is True
+
+
+def test_resume_budget_must_raise_the_ceiling():
+    with pytest.raises(SystemExit):
+        run_session.parse_args(["--budget-cents", "100", "--resume-budget-cents", "100"])
+
+
+def test_skill_scenario_requires_a_skill_name():
+    with pytest.raises(SystemExit):
+        run_session.parse_args(["--scenario", "skill"])
+    args = run_session.parse_args(["--scenario", "skill", "--skill-name", "xlsx"])
+    assert args.skill_name == "xlsx"
+
+
+def test_hello_scenario_requires_tools_marker_and_end_turn():
+    events = [
+        {"type": "agent.tool_use", "id": "one", "name": "write", "input": {"file_path": "hello.txt"}},
+        {"type": "agent.tool_use", "id": "two", "name": "bash", "input": {"command": "cat /workspace/hello.txt"}},
+        {"type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+    ]
+    ok, checks = run_session._scenario_verdict("hello", events, "BLAXEL_CMA_OK")
+    assert ok is True
+    assert all(checks.values())
+
+
+def test_advisor_scenario_requires_a_real_advisor_thread():
+    events = [
+        {"type": "agent.tool_use", "id": "one", "name": "write", "input": {"file_path": "advisor-proof.txt"}},
+        {"type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+    ]
+    ok, checks = run_session._scenario_verdict(
+        "advisor",
+        events,
+        "BLAXEL_ADVISOR_OK",
+        advisor_threads=[{"agent": {"type": "advisor", "model": "claude-opus-5"}}],
     )
-
-    run_session.require_quiet_proof_environment()
-
-
-def test_proof_preflight_rejects_existing_pollers(monkeypatch):
-    monkeypatch.setattr(
-        run_session,
-        "queue_stats",
-        lambda: {"depth": 0, "pending": 0, "workers_polling": 2},
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        run_session.require_quiet_proof_environment()
-
-    message = str(exc.value)
-    assert "workers_polling=2" in message
-    assert "fresh environment" in message
-
-
-def test_proof_preflight_rejects_existing_work(monkeypatch):
-    monkeypatch.setattr(
-        run_session,
-        "queue_stats",
-        lambda: {"depth": 1, "pending": 1, "workers_polling": 0},
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        run_session.require_quiet_proof_environment()
-
-    message = str(exc.value)
-    assert "depth=1" in message
-    assert "pending=1" in message
+    assert ok is True
+    assert checks["advisor_thread"] is True
 
 
 def test_proof_lines_include_inspect_command():
     text = "\n".join(run_session.proof_lines("cma-worker-x", "ant-run-y", "main"))
-
     assert "sandbox: cma-worker-x" in text
     assert "process: ant-run-y" in text
     assert "bl get sandbox cma-worker-x process --workspace main -o json" in text
@@ -60,7 +70,6 @@ def test_proof_lines_include_inspect_command():
 
 def test_claimed_elsewhere_names_the_shared_environment_invariant():
     text = "\n".join(run_session.claimed_elsewhere_lines("cma-worker-sesn-abc", "main"))
-
     assert "cma-worker-sesn-abc" in text
     assert "NOT found in workspace main" in text
     assert "one Anthropic environment per Blaxel workspace" in text
@@ -68,29 +77,25 @@ def test_claimed_elsewhere_names_the_shared_environment_invariant():
 
 
 async def test_worker_sandbox_lookup_found(monkeypatch):
-    seen = []
     sandbox = object()
 
     class FakeSandboxInstance:
         @staticmethod
         async def get(name):
-            seen.append(name)
+            assert name == "cma-worker-x"
             return sandbox
 
     monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
-
     assert await run_session.worker_sandbox_lookup("cma-worker-x") == ("found", sandbox)
-    assert seen == ["cma-worker-x"]
 
 
 async def test_worker_sandbox_lookup_missing_on_not_found(monkeypatch):
     class FakeSandboxInstance:
         @staticmethod
         async def get(name):
-            raise RuntimeError('GET ...: 404 Not Found {"error":"Sandbox not found"}')
+            raise RuntimeError("404 Not Found")
 
     monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
-
     assert await run_session.worker_sandbox_lookup("cma-worker-x") == ("missing", None)
 
 
@@ -101,13 +106,10 @@ async def test_worker_sandbox_lookup_unknown_on_auth_failure(monkeypatch):
             raise RuntimeError("401 Unauthorized")
 
     monkeypatch.setattr(run_session, "SandboxInstance", FakeSandboxInstance)
-
     assert await run_session.worker_sandbox_lookup("cma-worker-x") == ("unknown", None)
 
 
 async def test_ant_run_process_name_picks_latest_ant_run():
-    from types import SimpleNamespace
-
     class FakeProcessAPI:
         async def list(self):
             return [
@@ -116,9 +118,9 @@ async def test_ant_run_process_name_picks_latest_ant_run():
                 SimpleNamespace(name="ant-run-sesn-x-2"),
             ]
 
-    sandbox = SimpleNamespace(process=FakeProcessAPI())
-
-    assert await run_session.ant_run_process_name(sandbox) == "ant-run-sesn-x-2"
+    assert await run_session.ant_run_process_name(SimpleNamespace(process=FakeProcessAPI())) == (
+        "ant-run-sesn-x-2"
+    )
 
 
 async def test_ant_run_process_name_none_when_listing_fails():
@@ -126,7 +128,4 @@ async def test_ant_run_process_name_none_when_listing_fails():
         async def list(self):
             raise RuntimeError("boom")
 
-    from types import SimpleNamespace
-    sandbox = SimpleNamespace(process=FakeProcessAPI())
-
-    assert await run_session.ant_run_process_name(sandbox) is None
+    assert await run_session.ant_run_process_name(SimpleNamespace(process=FakeProcessAPI())) is None

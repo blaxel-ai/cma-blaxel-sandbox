@@ -1,403 +1,294 @@
-# Run Claude Managed Agent tools with Blaxel Sandboxes
+# Production guide: Claude Managed Agents on Blaxel
 
-Claude Managed Agents (CMA) gives you an agent loop hosted by Anthropic: the model, session state, event history, configured skills, and tool-calling harness. A self-hosted CMA environment keeps that orchestration on Anthropic's side but moves tool execution into infrastructure you control.
+Use [README.md](README.md) for the shortest runnable path. This guide explains the design, security model, production controls, and advanced features.
 
-This guide shows the Blaxel version of that self-hosted path: Anthropic runs the agent loop and work queue; Blaxel sandboxes run the webhook dispatcher and the per-session worker runtime.
+## System boundary
 
-## What CMA is
-
-CMA separates an agent into three pieces:
-
-| Piece | In this cookbook |
+| Owner | Responsibilities |
 | --- | --- |
-| Agent loop | Anthropic runs Claude, session state, event history, configured skills, and tool selection. |
-| Environment queue | Anthropic enqueues work items for a self-hosted environment. |
-| Tool execution | Blaxel worker sandboxes run bash, file tools, skill downloads, and code. |
+| Anthropic | Claude, agent configuration, session state, event history, skills, advisor threads, budgets, and the self-hosted work queue |
+| Blaxel orchestrator | Webhook verification, worker readiness, exact work claim, recovery dispatch, and process start |
+| Blaxel worker | `/workspace`, built-in tool execution, work heartbeat, result delivery, previews, and optional Volume or Proxy controls |
+| Your application | Session creation, user events, streamed output, receipts, input staging, and lifecycle policy |
 
-The model and event history remain on Anthropic's side. The filesystem, code runtime, process execution, and network boundary for tools live in the Blaxel worker sandbox. Skills are configured by Anthropic but downloaded and executed inside the worker when a session runs.
+The orchestrator never runs agent tools. It creates or resumes the per-session worker, then starts `ant beta:worker run` for the exact `work_*` and `sesn_*` pair.
 
-## What Blaxel adds
-
-Blaxel gives the self-hosted execution layer two sandbox roles:
-
-- **Control plane:** an orchestrator sandbox runs a FastAPI webhook dispatcher on a public preview URL. It receives `session.status_run_started`, verifies the webhook signature, schedules dispatch, readies the session worker sandbox, drains queued work with the Anthropic SDK, and starts one exact worker process per claimed session work item.
-- **Compute plane:** a worker sandbox runs `ant beta:worker run` for a specific `ANTHROPIC_WORK_ID` and `ANTHROPIC_SESSION_ID`. It runs built-in CMA tools in `/workspace`, heartbeats the work lease, posts results, and stops the work item when the run finishes.
-
-That split keeps the webhook small and lets each session run in its own sandboxed runtime.
-
-## Setup boundaries
-
-This cookbook is self-contained after a human supplies the account-level prerequisites: a Blaxel workspace, CLI login, a Blaxel service-account key for the workspace, Docker running locally, Claude Managed Agents beta access, and an Anthropic API key. The service-account key must be able to create/read/update/delete sandboxes, start/read/kill sandbox processes, and read logs/previews; optional Volume and Proxy paths need matching quota and permissions.
-
-Two Managed Agents steps remain Console-only:
-
-- Generate `ANTHROPIC_ENVIRONMENT_KEY` after `scripts/create_environment.py` creates the environment: open the Anthropic Console, select the workspace/project for your `ANTHROPIC_API_KEY`, open Managed Agents > Environments, choose the created `env_...`, and generate the key.
-- Register the webhook URL printed by `setup.py` in the same Anthropic workspace/project, subscribe it only to `session.status_run_started`, and copy the one-time `ANTHROPIC_WEBHOOK_SIGNING_KEY`.
-
-`BL_API_KEY` is for SDK calls and for the in-sandbox orchestrator to spawn workers. It does not replace `bl login` for `bl push`. `.env.example` uses `export NAME=value` lines; paste generated exports in that shape, replacing empty lines instead of accumulating duplicate values.
-
-## How the self-hosted flow works
-
-```text
-User creates a session
-        |
-        v
-Anthropic enqueues work on the self-hosted environment
-        |
-        v
-Anthropic sends session.status_run_started to the Blaxel preview URL
-        |
-        v
-Orchestrator sandbox verifies whsec_ and schedules background dispatch
-        |
-        v
-Background dispatcher readies the session sandbox, then claims queued work with the SDK
-        |
-        v
-Worker sandbox runs ant beta:worker run for work_... / sesn_...
-        |
-        v
-Worker runs tools, heartbeats, posts results, and exits after end_turn idle
-```
+## Request lifecycle
 
 ```mermaid
 sequenceDiagram
-    actor User
-    participant A as Anthropic CMA
-    participant O as Blaxel orchestrator sandbox
-    participant W as Blaxel worker sandbox
+    actor App
+    participant CMA as Anthropic CMA
+    participant O as Blaxel orchestrator
+    participant W as Blaxel worker
 
-    User->>A: create session + send message
-    A->>A: enqueue work on environment queue
-    A->>O: POST /webhook session.status_run_started
-    O->>O: verify webhook signature
-    O-->>A: 200 ok
-    O->>W: create_if_not_exists session sandbox
-    O->>A: claim work item with SDK poller
-    O->>W: start ant run with WORK_ID + SESSION_ID
-    W->>A: heartbeat work lease
-    W->>W: run tools in /workspace
-    W->>A: post tool results
-    W->>A: stop work item
-    Note over W: ant run exits after --max-idle once stop_reason=end_turn
-    Note over W: TTL is max-age cleanup from sandbox creation
+    App->>CMA: Create budgeted session
+    App->>CMA: Open event stream and send user.message
+    CMA->>O: Signed session.status_run_started webhook
+    O-->>CMA: 200 immediately
+    O->>W: Create or resume session sandbox
+    O->>CMA: Claim queued work
+    O->>W: Start ant worker for exact work and session
+    W->>CMA: Heartbeats and tool results
+    CMA-->>App: Agent, usage, error, and idle events
+    App->>CMA: List all event pages for final reconciliation
 ```
 
-The orchestrator claims work; it does not execute tools. It returns the webhook response quickly, then uses a background dispatcher to ready the worker before claiming so the claimed-work gap before `ant run` stays short. Once the SDK yields an already-acked work item, the dispatcher starts `ant beta:worker run` with the exact work id and session id. The CLI owns the first heartbeat, session event stream, tool execution, and work stop for that item.
+The event stream is the responsive path. The complete paginated event list is the authoritative final record and reconnect path. `session.error` is a failure even when earlier HTTP requests succeeded.
 
-## Security and credential boundaries
+## Configuration
 
-| Credential | Where it should live | Why |
-| --- | --- | --- |
-| `ANTHROPIC_API_KEY` | local shell only | Creates environments, agents, sessions, and reads events. Never put it on the worker. |
-| `ANTHROPIC_ENVIRONMENT_KEY` | orchestrator and worker process | Scoped, revocable key used to claim work and run the session tools. |
-| `ANTHROPIC_WEBHOOK_SIGNING_KEY` | orchestrator | Verifies inbound webhook deliveries from Anthropic. |
-| `BL_API_KEY` | local shell and orchestrator | Service-account key that lets the orchestrator create worker sandboxes. |
-| `BLAXEL_WORKER_PROXY_SECRET_VALUE` | optional local shell and orchestrator | Advanced public-preview path for Blaxel Proxy secret injection on worker outbound requests. It is not passed to the worker process env. |
+### Required local values
 
-Important boundaries:
+| Variable | Purpose |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Control-plane access for environments, agents, sessions, and events |
+| `BL_WORKSPACE` | Exact Blaxel workspace |
+| `BL_API_KEY` | Service-account access for sandbox operations |
+| `ANTHROPIC_ENVIRONMENT_ID` | Self-hosted environment created by the setup script |
+| `ANTHROPIC_ENVIRONMENT_KEY` | Scoped work-queue and worker credential |
+| `ANTHROPIC_AGENT_ID` | Versioned agent configuration used by examples |
+| `ANTHROPIC_WEBHOOK_SIGNING_KEY` | Webhook verification secret |
 
-- Agent-run shell commands can read worker process environment variables. Do not put broad cloud credentials, customer credentials, or the org `ANTHROPIC_API_KEY` on the worker.
-- `setup.py` passes orchestrator env through an explicit allowlist; `ANTHROPIC_API_KEY` and `ANTHROPIC_AGENT_ID` are intentionally not included. The worker process receives a narrower env containing the claimed work/session ids, the environment id/key, and optional `ANTHROPIC_BASE_URL`.
-- CMA file tools are scoped to `/workspace` in this cookbook and require relative paths such as `hello.txt`. Bash is still a shell inside the worker container and is not the same containment boundary.
-- Tool inputs and outputs still flow through Anthropic's control plane so Claude can decide what to do next.
-- This cookbook demonstrates self-hosted compute isolation and work-queue scoping. Blaxel Proxy secret injection is available as an advanced public-preview option; keep it clearly labeled and run it in a proxy-supported region that matches the worker sandbox.
-- Before production use, harden the image and deployment for your trust boundary: root user, Docker availability, egress, public preview URLs, secret storage, key rotation, and log retention all need review.
+`bl push` uses the CLI login. `BL_API_KEY` does not replace `bl login`.
 
-## Run it locally before the webhook
+### Agent defaults
 
-The fastest proof is the worker-only path. It uses real Anthropic sessions and real Blaxel sandboxes, but does not require webhook registration to validate the runtime first. Run it before webhook registration. After a webhook or another worker exists for the same self-hosted environment, use this mode only after stopping the other claimant. The example script refuses to create a proof session while the environment has queued work or active `workers_polling`, because the first worker to claim queued work owns it. A passing transcript is only proof of this Blaxel path when the matching `cma-worker-<session>` sandbox shows the expected `ant-run-*` process.
+The default agent uses `claude-sonnet-5` and the built-in `agent_toolset_20260401`. Sonnet 5 uses adaptive thinking by default. Do not add manual thinking budgets or non-default sampling values.
 
-`python3 bootstrap.py --plan` shows the next setup action, and `python3 bootstrap.py` runs the deterministic parts of the flow until it reaches a Console gate. Bootstrap uses the default image publish names. If you need custom image names in a shared workspace, follow the manual push commands and pass matching `bl push --name ...` values for `BLAXEL_WORKER_IMAGE` and `ORCHESTRATOR_IMAGE`.
-
-1. Install local deps and load env. If following this file directly, first copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`, `BL_WORKSPACE`, and `BL_API_KEY`.
+Optional agent creation settings:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements-dev.txt
-set -a; source .env; set +a
-```
-
-2. Check the local setup:
-
-```bash
-python3 scripts/preflight.py
-```
-
-3. Create the self-hosted environment:
-
-```bash
-python3 scripts/create_environment.py
-```
-
-Save the printed `ANTHROPIC_ENVIRONMENT_ID` to `.env`, generate `ANTHROPIC_ENVIRONMENT_KEY` in the Anthropic Console under **Manage > Environments**, and add it to `.env`. Reload env so both reach your shell before the worker-only run:
-
-```bash
-set -a; source .env; set +a
-```
-
-4. Build the worker:
-
-```bash
-( cd worker && bl push --workspace "$BL_WORKSPACE" --type sandbox )
-```
-
-5. Create the agent:
-
-```bash
+export ANTHROPIC_AGENT_MODEL=claude-sonnet-5
+export ANTHROPIC_INFERENCE_GEO=us
+export ANTHROPIC_ADVISOR_MODEL=claude-opus-5
+export ANTHROPIC_AGENT_SKILLS=xlsx,skill_01Example@latest
 python3 scripts/create_agent.py
 ```
 
-Set `ANTHROPIC_AGENT_MODEL` before this step only if the default model is unavailable in your Anthropic org.
+Changing these values creates a new agent. Save the printed ID before you start sessions.
 
-6. Run the direct-dispatch session:
+### Skills and external inputs
 
-```bash
-python3 example/run_session.py --direct-dispatch
-```
+Managed Agent skills are agent configuration. The worker downloads them into its work directory. Use Anthropic skill names such as `xlsx`, or custom workspace IDs such as `skill_*`.
 
-Success looks like:
+Self-hosted sessions reject `resources`. Do not attach a GitHub repository as a session resource. Use one of these patterns:
 
-```text
-session: sesn_...
-message sent
-[direct-dispatch] cma-worker-... is running work_... as ant-run-...
-  tool: write {"content": "hello from blaxel", "file_path": "hello.txt"}
-  tool: bash {"command": "cat /workspace/hello.txt && echo"}
+- Put reusable instructions in a Managed Agent custom skill.
+- Put an object URL or commit SHA in session metadata.
+- Retrieve the session metadata after work claim, then stage files before tool execution.
+- Bake trusted, static project material into a purpose-built worker image.
 
-final agent message: ... hello from blaxel ...
-EXAMPLE: PASS
-```
+Treat staged code and skills as executable input. Pin revisions and use least-privilege credentials.
 
-This proves the agent session, environment key, worker image, Blaxel sandbox creation, exact work claiming, file tools, bash tool, and result posting all work before the webhook is involved.
+## Sessions and costs
 
-Then verify worker attribution with the sandbox and process names printed by the script:
+The examples create a budget before the first turn. Anthropic does not let you add a budget later to an unbudgeted session.
 
-```bash
-bl get sandbox <cma-worker-sesn-...> process --workspace "$BL_WORKSPACE" -o json
-bl logs sandbox <cma-worker-sesn-...> <ant-run-...> --workspace "$BL_WORKSPACE" --period 1h
-```
+The default is 100 US cents. The session pauses with `budget_reached` when the tracked list cost reaches the ceiling. Enforcement happens between model requests, so the request that crosses the ceiling finishes.
 
-Pass criteria: the worker sandbox name matches the session, the process starts with `ant-run-`, the command is `ant beta:worker run --workdir /workspace`, and the logs show the expected `write` and `bash` tool dispatches. `EXAMPLE: PASS` proves the transcript; the Blaxel process/log proof proves attribution.
+Each successful example prints:
 
-## Add Blaxel capabilities where they fit
+- Resolved model ID.
+- Input and output tokens.
+- List cost in US cents.
+- Runtime-priced active seconds.
+- Total duration.
 
-Use Blaxel capabilities where they make the CMA proof stronger or the agent's runtime easier to inspect and reuse.
+Use `--resume-budget-cents` to raise the same ceiling once. Use `--no-budget` only for a deliberate exception.
 
-| Blaxel feature | Natural CMA fit | Cookbook path |
+## Dispatch reliability
+
+The webhook is a fast path. The orchestrator also runs a recovery loop.
+
+| Control | Default | Purpose |
 | --- | --- | --- |
-| Process records and logs | A transcript can pass even when the wrong claimant handled the work; Blaxel shows what actually ran in the worker sandbox. | Inspect the matching `cma-worker-<session>` sandbox for the `ant-run-*` process and logs. |
-| Real-time previews | The agent can build a web app in `/workspace`; Blaxel makes the running app reachable immediately, publicly or with a short-lived preview token. | `python3 example/demo_preview_resume.py` starts the app as a supervised process, creates a preview URL, checks process/log access, and proves standby/resume. Use `--private-preview` for a token-protected preview. |
-| Volumes | A coding agent's project workspace can outlive a worker sandbox when quota is available. | Set `BLAXEL_WORKER_VOLUME_ENABLED=true` plus `BL_REGION`; the worker gets a per-session Volume mounted at `/workspace`. |
-| Proxy secret injection (public preview) | Worker code can call an external API without putting the API key into the worker process environment. | Advanced public-preview, region-dependent path: set `BLAXEL_WORKER_PROXY_DESTINATIONS` and `BLAXEL_WORKER_PROXY_SECRET_VALUE`; the orchestrator creates the worker with a proxy route in the worker's region. |
+| `ANT_DISPATCHER_DEBOUNCE_MS` | `250` | Collect near-simultaneous starts before claim |
+| `ANT_DISPATCHER_ATTEMPTS` | `3` | Retry transient claim failures |
+| `ANT_DISPATCHER_RECOVERY_SECONDS` | `15` | Recover delayed or missed webhook work |
+| `ANT_MAX_CONCURRENT_WORKER_STARTS` | `8` | Bound worker cold-start fan-out |
+| `BLAXEL_WORKER_READY_ATTEMPTS` | `45` | Bound sandbox readiness checks |
+| `ANT_RUN_START_ATTEMPTS` | `10` | Bound process start attempts after claim |
+| `ANT_DISPATCHER_RECLAIM_MS` | `30000` | Reclaim acknowledged but unhandled work |
 
-Volume-backed workspaces are per-session by design. A Blaxel Volume can attach to one sandbox at a time, and CMA sessions can run concurrently, so the cookbook creates `cma-workspace-<session>` instead of sharing one Volume across all workers. This path also requires Volume quota in the selected workspace; if quota is `0/0`, keep the default `/workspace` path or use a quota-enabled workspace for the Volume proof.
+The webhook and recovery path share one dispatcher lock. Work claims are durable. In-process sets only suppress duplicate starts during the local handoff.
 
-### Handle secrets
+Use one Anthropic environment per Blaxel workspace. Any claimant for a shared environment can run work with its own Blaxel credentials.
 
-The recommended way to give the agent access to third-party credentials in this template is Blaxel Proxy secret injection. Configure the proxy route with `BLAXEL_WORKER_PROXY_DESTINATIONS` and `BLAXEL_WORKER_PROXY_SECRET_VALUE`, and the proxy injects the credential into the worker's outbound requests to those destinations. The secret never enters the worker sandbox environment and never lives in the CMA agent or session config, so a prompt-injected or buggy agent cannot read or exfiltrate it from the sandbox. Domain filtering (`BLAXEL_WORKER_PROXY_ALLOWED_DOMAINS`) composes with this to restrict where the worker can connect at all.
+## Worker profiles
 
-Proxy secret injection is intentionally separate from the core `ANTHROPIC_ENVIRONMENT_KEY` flow. `ant beta:worker run` still receives the scoped environment key it needs to serve the claimed work item; that key authenticates the worker to Anthropic's queue and cannot move to the proxy. Proxy injection covers the agent's outbound application calls, such as a generated app or script calling a third-party API.
+### Quickstart
 
-When Proxy env vars are set, the cookbook checks Blaxel platform configuration before creating the worker and fails fast if `BL_REGION` is missing or does not report `proxyAvailable: true`. This keeps the public-preview feature explicit without making the default worker path depend on it.
+Use quickstart for Python, Node.js, shell, Git, and common build tasks. It is the default Docker target and Blaxel build profile.
 
-## Run it through the webhook
+### Full
 
-After the worker path works, add the webhook automation.
-
-1. Build the orchestrator image:
-
-```bash
-( cd orchestrator && bl push --workspace "$BL_WORKSPACE" --type sandbox )
-```
-
-2. Create or update the orchestrator sandbox:
+Use full when tasks need Go, Rust, Java, Ruby, PHP, database clients, or Docker tooling.
 
 ```bash
-python3 setup.py
+cd worker
+bl push --workspace "$BL_WORKSPACE" --type sandbox \
+  --name cma-worker-full \
+  --build-env-file full.build.env
 ```
 
-Setup starts `uvicorn` in the orchestrator sandbox and prints:
+Set `BLAXEL_WORKER_IMAGE=sandbox/cma-worker-full:latest` before you start or update the orchestrator.
 
-```text
-=== Register this as the Anthropic webhook URL ===
-  https://<id>.preview.bl.run/webhook
-```
+Both profiles contain `sandbox-api`, `ant`, `/workspace`, and `/mnt/session/outputs`. Both run `worker/smoke.sh` in CI.
 
-3. In the Anthropic Console, create a webhook for `session.status_run_started` pointing to that URL. Copy the one-time `whsec_...` signing secret.
+## Blaxel features
 
-4. Add the signing secret to `.env`, reload env, and rerun setup:
+### Process proof
 
-```text
-export ANTHROPIC_WEBHOOK_SIGNING_KEY=whsec_...
-```
+Transcript success proves the session. It does not prove which worker handled it. Require the matching sandbox and process:
 
 ```bash
-set -a; source .env; set +a
-python3 setup.py
+bl get sandbox cma-worker-sesn-... process \
+  --workspace "$BL_WORKSPACE" -o json
+
+bl logs sandbox cma-worker-sesn-... ant-run-... \
+  --workspace "$BL_WORKSPACE" --period 1h
 ```
 
-The rerun keeps the same preview URL and restarts the webhook server with the current signing key.
+### Private previews
 
-5. Run a full session:
+The preview demo creates a token-protected preview by default. It checks that access without the token fails. It also checks that the same server process remains after standby and resume.
+
+Public preview is explicit:
 
 ```bash
-python3 example/run_session.py
+python3 example/demo_preview_resume.py --public-preview
 ```
 
-Success is the same transcript shape as the direct-dispatch run. The difference is that Anthropic now triggers the orchestrator, and the orchestrator claims and dispatches the work item.
+### Per-session Volume
 
-As with the direct-dispatch run, `EXAMPLE: PASS` from the transcript only confirms the session completed. In webhook mode the example then verifies the `cma-worker-<session>` sandbox with your `BL_API_KEY`; if another claimant on the same environment ran the work, it prints a NOTE saying the worker landed in a different workspace instead of a proof command that 404s. To attribute the run fully, check the sandbox for the expected `ant-run-*` process, or read the orchestrator logs for the claimed `work_...` id.
+Enable a Volume only when project state must survive worker deletion or recreation:
 
 ```bash
-bl get sandbox cma-worker-sesn-... process --workspace "$BL_WORKSPACE" -o json
-bl logs sandbox cma-worker-sesn-... ant-run-... --workspace "$BL_WORKSPACE" --period 1h
+export BL_REGION=us-pdx-1
+export BLAXEL_WORKER_VOLUME_ENABLED=true
+export BLAXEL_WORKER_VOLUME_SIZE_MB=2048
+export BLAXEL_WORKER_VOLUME_MOUNT=/workspace
 ```
 
-That Blaxel process record is the worker-side proof. The `ant-run-*` logs should show the claimed session work and the tool dispatches.
+One Volume belongs to one session worker. Delete the sandbox first. Then delete the Volume and wait for confirmed absence.
 
-## Observe and debug it
+### Proxy secret injection
 
-Use these checkpoints when a session stalls:
+Use Blaxel Proxy for third-party request credentials when the worker region supports it:
 
-| Layer | Healthy signal | What to inspect |
+```bash
+export BL_REGION=us-pdx-1
+export BLAXEL_WORKER_PROXY_DESTINATIONS=api.example.com
+export BLAXEL_WORKER_PROXY_HEADER_NAME=Authorization
+export BLAXEL_WORKER_PROXY_HEADER_VALUE='Bearer {{SECRET:api-token}}'
+export BLAXEL_WORKER_PROXY_SECRET_NAME=api-token
+export BLAXEL_WORKER_PROXY_SECRET_VALUE=...
+```
+
+The orchestrator uses the secret to configure the sandbox network. It does not pass the secret into the worker process environment.
+
+## Security boundaries
+
+- Keep `ANTHROPIC_API_KEY` local. Never send it to the orchestrator or worker.
+- The environment key enters the worker process. Agent shell commands can read worker environment variables.
+- Run workers without `--unrestricted-paths`. This limits file tools to `/workspace`.
+- The path limit is not a shell sandbox. Bash can access other paths inside the container.
+- Keep preview apps private unless public access is required.
+- Verify the webhook signature before reading its event.
+- Use an allowlist for every orchestrator environment variable.
+- Use Proxy injection for third-party secrets when possible.
+- Review and pin custom skills.
+- Set session budgets and local timeouts.
+
+## Health and operations
+
+`GET /health` reports process liveness. `GET /ready` reports configuration readiness, worker image, recovery interval, and the last recovery result. Setup checks both endpoints when the signing key exists.
+
+Use the operations CLI for a current view:
+
+```bash
+python3 cookbook.py status
+```
+
+Its output includes queue depth, pending claims, active pollers, resolved agent configuration, default-model drift warnings, recent cookbook receipts, worker sandboxes, and Volumes.
+
+Cleanup requires an exact session:
+
+```bash
+python3 cookbook.py cleanup --session sesn_...
+python3 cookbook.py cleanup --session sesn_... --apply
+```
+
+The default action archives the Anthropic session. Use `--session-action delete` only when history must be removed. Use `--interrupt` only when you intend to stop a running session.
+
+## Failure handling
+
+| Signal | Meaning | Action |
 | --- | --- | --- |
-| Anthropic session | `example/run_session.py` prints growing event counts and `EXAMPLE: PASS` | Session id, session events, queue stats printed by the script |
-| Webhook | Anthropic delivery gets HTTP 200 | `ANTHROPIC_WEBHOOK_SIGNING_KEY`, `/webhook` URL, orchestrator `/health` |
-| Orchestrator | Logs show claimed `work_...` and started `ant-run-*` | Webhook server process logs |
-| Worker | `ant-run-*` process starts and tool events appear | Worker sandbox name `cma-worker-*`, process logs, image contents |
-| Runtime | File and bash tools produce non-empty results | `/workspace`, command stdout |
+| `session.error` | Execution failed | Read the error type and retry status; fail the run |
+| `budget_reached` | Hard list-cost ceiling reached | Stop or raise the existing ceiling |
+| `requires_action` | A tool needs an external result or confirmation | Handle the event explicitly |
+| `retries_exhausted` | Managed retry policy ended | Inspect session errors and spans |
+| Stream disconnect | Live connection failed | Reconnect and list full event history |
+| No event progress | Worker stalled or froze | Interrupt and inspect `ant-run-*` logs |
+| Transcript pass without worker | Another claimant ran it | Use a quiet environment and direct dispatch |
+| `/ready` returns 503 | Signing or dispatcher config is incomplete | Fix the listed problem, then rerun setup |
 
-Common failures:
+## Verification ladder
 
-| Symptom | Fix |
-| --- | --- |
-| Webhook returns 503 | Add `ANTHROPIC_WEBHOOK_SIGNING_KEY` to `.env`, reload env, rerun `python3 setup.py`; if the key exists, inspect the event payload for a missing session id. Claim/start failures happen after the webhook 200 and show up in orchestrator logs. |
-| Webhook returns 401 | Use the `whsec_...` value from the Anthropic Console and keep `anthropic[webhooks]` in the orchestrator image. |
-| Worker freezes | Start the worker process with `keep_alive: True`; outbound-only traffic does not hold the sandbox active. |
-| File tool rejects a path | Use `hello.txt`, not `/workspace/hello.txt`. |
-| Shell result is empty | Append output such as `&& echo ok`. |
-| Example proof reports `workers_polling` | Stop other workers using the same self-hosted environment, or use a fresh environment for this proof. |
-| Volume setup reports `Quota exceeded: 0/0 volumes` | Disable `BLAXEL_WORKER_VOLUME_ENABLED` for the quickstart, or request Volume quota before using the Volume-backed `/workspace` path. |
-| Proxy setup says `BL_REGION` is missing or unsupported | Set `BL_REGION` to the worker sandbox region and choose a region where Blaxel platform configuration reports `proxyAvailable: true`. |
-| Later turn or reclaim retry does not start | Use unique `ant-run-*` process names derived from the `work_...` id plus a suffix. Process records persist after completion. |
-| Transcript passes but no matching `ant-run-*` exists in the Blaxel worker sandbox | Another claimant handled the queued work. Stop any other direct dispatcher, webhook orchestrator, or cookbook worker using the same self-hosted environment before using the run as proof. |
-| Private preview works in the script but not in a browser | Private previews require either a `bl_preview_token` query parameter or the `X-Blaxel-Preview-Token` header. Rerun the preview demo with `--print-preview-token` only for manual testing. |
-
-For noisy proof environments, wait about 30 seconds and retry once. If `workers_polling` or queued work remains, delete this cookbook's orchestrator sandbox or use a fresh Anthropic environment before creating another proof session:
+Run local tests before any live resource change:
 
 ```bash
-bl delete sandbox "${ORCHESTRATOR_NAME:-cma-orchestrator-app}" --workspace "$BL_WORKSPACE"
-bl get sandboxes --workspace "$BL_WORKSPACE" -o json
-```
-
-Delete leftover `cma-worker-*` sandboxes only after their sessions are no longer active.
-
-## Verify the cookbook
-
-Run the fast local checks before publishing docs or code changes:
-
-```bash
-.venv/bin/python -B -m py_compile bootstrap.py setup.py orchestrator/app.py orchestrator/blaxel_features.py example/*.py scripts/*.py
+.venv/bin/python -m pip check
+.venv/bin/python -B -m compileall -q \
+  bootstrap.py cookbook.py setup.py orchestrator example scripts
 .venv/bin/python -m pytest -q
 ```
 
-Run the image smokes when the worker image, orchestrator image, or CI workflow changes:
+Build and smoke both worker profiles:
 
 ```bash
-docker build --platform linux/amd64 -t cma-worker:smoke worker
-docker run --platform linux/amd64 --rm --entrypoint /worker/smoke.sh cma-worker:smoke
-docker build --platform linux/amd64 -t cma-orchestrator:smoke orchestrator
-docker run --platform linux/amd64 --rm --entrypoint python \
-  -e ANTHROPIC_ENVIRONMENT_ID=env_test \
-  -e ANTHROPIC_ENVIRONMENT_KEY=envkey_test \
-  -e BL_API_KEY=blkey_test \
-  -e BL_WORKSPACE=workspace_test \
-  -e ANTHROPIC_WEBHOOK_SIGNING_KEY=whsec_test \
-  cma-orchestrator:smoke \
-  -c "import app, blaxel_features; print('orchestrator-import-ok')"
+docker build --platform linux/amd64 \
+  --build-arg WORKER_PROFILE=quickstart \
+  -t cma-worker:quickstart worker
+docker run --platform linux/amd64 --rm \
+  --entrypoint /worker/smoke.sh cma-worker:quickstart
+
+docker build --platform linux/amd64 \
+  --build-arg WORKER_PROFILE=full \
+  -t cma-worker:full worker
+docker run --platform linux/amd64 --rm \
+  --entrypoint /worker/smoke.sh cma-worker:full
 ```
 
-Live proof commands create Anthropic sessions and Blaxel resources. Use them when validating launch readiness, not for every wording edit:
+Then run live checks in this order:
 
-```bash
-python3 example/run_session.py --direct-dispatch
-python3 example/run_session.py
-python3 example/demo_preview_resume.py
-python3 example/demo_preview_resume.py --private-preview
-python3 example/validate_long_session.py
-```
-
-## Why Blaxel Sandboxes
-
-Blaxel is a strong fit for self-hosted CMA execution when you want:
-
-- A batteries-included worker image by default, with a Dockerfile you can customize or slim for your stack.
-- One sandbox per session, named from the Anthropic session id and isolated from other sessions.
-- Public or token-protected private preview URLs for webhook receivers and for apps the agent creates during a session.
-- Optional per-session Volumes mounted at `/workspace` for durable project state when the workspace has Volume quota.
-- Optional Blaxel Proxy routing for server-side secret injection on outbound worker requests, clearly labeled public preview, region-dependent, and run in a proxy-supported worker region.
-- Process APIs and logs for seeing exactly what ran inside the sandbox.
-- Standby/resume behavior for long-lived orchestrators and demo apps that should not burn compute while idle.
-- TTL and expiration policies as lifecycle backstops for abandoned workers.
-- SDK and CLI control for building, pushing, creating, inspecting, and deleting sandboxes.
-
-The included worker image is cloud-sandbox-compatible, not Anthropic-managed. It installs the language runtimes, package managers, database clients, and utilities from Anthropic's cloud sandbox reference and smokes the documented version floors, while still being a Dockerfile you own and can slim or pin for your stack.
-
-## Operational gotchas
-
-- The worker image is the agent runtime. Add, remove, or pin runtime dependencies in `worker/Dockerfile`.
-- The final image is Debian/glibc on linux/amd64. It is compatible with the documented cloud sandbox tool surface, not byte-identical to Anthropic's Ubuntu 22.04 cloud image.
-- `/bin/bash`, `tar`, and `unzip` are required by the agent toolset and skill downloads.
-- The worker uses `--workdir /workspace` and does not use `--unrestricted-paths`.
-- `--max-idle` controls when `ant beta:worker run` exits after the session goes idle with `stop_reason=end_turn`.
-- `BLAXEL_WORKER_TTL` is max age from sandbox creation. It is a Blaxel lifecycle backstop for abandoned workers, not idle deletion; standby/resume handles ordinary inactivity and should keep expected sessions reusable until TTL or an expiration policy deletes them.
-- Use one active work-claiming path per self-hosted environment during proof runs. Environment-polling workers, `--direct-dispatch`, webhook dispatchers, and other cookbook workers all compete for the same Anthropic queue. Quiet queue stats before session creation do not prove isolation if Anthropic can still deliver `session.status_run_started` to a registered webhook.
-- Use one Anthropic environment per Blaxel workspace. The winning claimant creates the worker with its own Blaxel credentials, so `BL_WORKSPACE` does not pin where a shared environment's work lands.
-- Duplicate webhook deliveries are safe because dispatch waits briefly to collect near-simultaneous sessions, pre-readies scheduled and still-queued session sandboxes before claiming, suppresses duplicate session schedules and currently in-flight work handoffs in-process, and relies on the SDK claim step for durable queue idempotency. If no work is found, another dispatcher may already have claimed it.
-- Sandbox names allow lowercase alphanumerics and hyphens. Anthropic session ids are sanitized before becoming worker names.
-- This sample passes a service-account `BL_API_KEY` to the orchestrator so it can create worker sandboxes.
-- `BLAXEL_WORKER_VOLUME_ENABLED=true` requires Volume quota and `BL_REGION`, because the Volume and sandbox must be in the same region. The cookbook mounts the Volume at `/workspace` by default.
-- The cookbook applies public-preview Blaxel Proxy and network config through worker sandbox creation/reuse only when the Proxy env vars are set. Delete old test workers before switching proxy routes, domain filters, or proxy secrets for a proof run. On Blaxel itself, proxy-enabled sandboxes can update proxy routing and domain config, but enabling proxy on a sandbox that was created without it still requires a new sandbox.
-- Nothing is auto-exported from the worker. Read files back from `/workspace`, or expose an app through a preview URL.
+1. Direct-dispatch hello proof.
+2. Webhook hello proof.
+3. Only the optional feature your deployment needs.
+4. `cookbook.py status` receipt.
+5. Exact cleanup plan.
 
 ## Teardown
 
-The orchestrator sandbox and preview URL stay live until you remove them. Use your custom `ORCHESTRATOR_NAME` if you set one:
+Per-session cleanup is automated. Broader teardown remains explicit because it affects shared resources.
 
-```bash
-bl delete sandbox "${ORCHESTRATOR_NAME:-cma-orchestrator-app}" --workspace "$BL_WORKSPACE"
-```
+- Archive or delete test sessions.
+- Delete each exact worker. Wait for absence.
+- Delete its Volume after the worker. Wait for absence.
+- Remove the Anthropic webhook before deleting its Blaxel orchestrator.
+- Delete the orchestrator only when no session depends on it.
+- Revoke throwaway environment keys.
+- Delete throwaway agents and environments only after you confirm they are not shared.
+- Keep published images for reuse unless registry removal is intentional.
 
-Worker sandboxes have a TTL max age. If a test worker is still present after a failed run, delete the matching `cma-worker-*` sandbox after the session is no longer active:
+## Primary references
 
-```bash
-bl get sandboxes --workspace "$BL_WORKSPACE" -o json
-bl delete sandbox cma-worker-sesn-... --workspace "$BL_WORKSPACE"
-```
-
-If Volume mode was enabled, delete the matching per-session Volume after the worker is gone:
-
-```bash
-bl get volumes --workspace "$BL_WORKSPACE" -o json
-bl delete volume cma-workspace-sesn-... --workspace "$BL_WORKSPACE"
-```
-
-If Proxy routes, domain filters, or proxy secrets changed during testing, delete old `cma-worker-*` sandboxes before rerunning the proof so new workers receive the current sandbox config.
-
-Proxy config for this cookbook is attached to worker sandbox creation, so deleting old `cma-worker-*` test sandboxes is the intended cleanup for changed Proxy routes, domain filters, and injected secrets. If your workspace exposes separate Proxy secret resources, delete the throwaway secret named by `BLAXEL_WORKER_PROXY_SECRET_NAME` as well.
-
-Published sandbox images are intentionally retained for reuse by default; this teardown removes runtime resources, not registry artifacts. If you used unique throwaway image names and your workspace exposes a supported image cleanup path, delete those image artifacts too.
-
-Also clean up external state when you are done testing:
-
-- Remove or disable the Anthropic webhook.
-- Revoke the environment key if it was only for the test.
-- Delete old Anthropic environments or agents if you created throwaway ones.
-
-## Links
-
-- [Anthropic self-hosted sandboxes](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes)
-- [Anthropic Managed Agents overview](https://platform.claude.com/docs/en/managed-agents/overview)
-- [Blaxel docs](https://docs.blaxel.ai)
+- [Start a Managed Agents session](https://platform.claude.com/docs/en/managed-agents/sessions)
+- [Events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming)
+- [Self-hosted sandboxes](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes)
+- [Managed Agent skills](https://platform.claude.com/docs/en/managed-agents/skills)
+- [Multiagent orchestration](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration)
+- [Claude Sonnet 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5)
+- [Blaxel documentation](https://docs.blaxel.ai)
