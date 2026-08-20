@@ -29,7 +29,7 @@ client.beta.sessions.create = (params, options) => createSession({
     type: 'limit',
     max_list_cost: {amount: String(budgetCents), currency: 'USD'},
   },
-  metadata: {cookbook: 'blaxel-cma', surface: 'ag-ui'},
+  metadata: {...params.metadata, cookbook: 'blaxel-cma', surface: 'ag-ui'},
 }, options);
 
 const sessions = new InMemorySessionStore();

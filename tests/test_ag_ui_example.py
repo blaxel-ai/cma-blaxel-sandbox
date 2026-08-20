@@ -17,6 +17,7 @@ def test_every_ag_ui_session_is_budgeted_and_attributable():
     assert "max_list_cost" in runtime
     assert "cookbook: 'blaxel-cma'" in runtime
     assert "surface: 'ag-ui'" in runtime
+    assert "...params.metadata" in runtime
 
 
 def test_runtime_validates_spend_timeout_and_agent_version_inputs():
