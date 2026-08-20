@@ -4,9 +4,9 @@
   <img src="assets/cma-blaxel-sandbox-15s.gif" alt="Claude Managed Agents running work in a Blaxel sandbox" width="960">
 </p>
 
-Claude Managed Agents (CMA) lets you define a reusable agent, equip it with tools and session state, start work from application events, and run each session in an isolated Blaxel sandbox with a concrete result and traceable lifecycle.
+Claude Managed Agents (CMA) separates a reusable agent definition from the environment where tools run, the persistent session that holds one task or conversation, and the events exchanged with your application.
 
-Run Anthropic's hosted agent loop with tool execution in isolated Blaxel sandboxes. This cookbook gives you a verified worker, a webhook orchestrator, safe cost controls, live event output, and exact cleanup.
+Run Anthropic's hosted agent loop with tool execution in isolated Blaxel sandboxes. This cookbook gives you a verified SDK worker, a webhook orchestrator, safe cost controls, multi-turn sessions, an AG-UI application example, and exact cleanup.
 
 ![Claude Managed Agents flow through a Blaxel sandbox with process proof](assets/cma-blaxel-sandbox-flow.png)
 
@@ -38,7 +38,7 @@ Usage receipt:
 
 Blaxel process proof:
   sandbox: cma-worker-sesn-...
-  process: ant-run-...
+  process: cma-run-...
 ```
 
 ## Architecture
@@ -48,7 +48,7 @@ flowchart LR
     U["Your app"] -->|"create session and stream events"| A["Anthropic Managed Agents"]
     A -->|"session.status_run_started"| O["Blaxel orchestrator"]
     O -->|"claim exact work item"| A
-    O -->|"start ant worker"| W["Per-session Blaxel sandbox"]
+    O -->|"start SDK worker"| W["Per-session Blaxel sandbox"]
     W -->|"tool results and heartbeat"| A
     W --> P["Process logs, private previews, optional Volume"]
 ```
@@ -100,7 +100,7 @@ The default applies when you create a new agent. Managed Agent configurations ar
 ```bash
 set -a; source .env; set +a
 python3 scripts/create_agent.py
-# Replace ANTHROPIC_AGENT_ID in .env with the printed value.
+# Replace ANTHROPIC_AGENT_ID and ANTHROPIC_AGENT_VERSION in .env.
 python3 cookbook.py status
 ```
 
@@ -125,7 +125,7 @@ A valid run has all three results:
 
 - `EXAMPLE: PASS` from deterministic transcript checks.
 - A usage receipt with model, tokens, cost, and active time.
-- A matching `cma-worker-*` sandbox and `ant-run-*` process.
+- A matching `cma-worker-*` sandbox and `cma-run-*` process.
 
 Use one active queue claimant per environment during proof. Another dispatcher can claim the work and make transcript-only attribution invalid.
 
@@ -153,7 +153,24 @@ python3 scripts/create_agent.py
 python3 example/run_session.py --direct-dispatch --scenario skill --skill-name xlsx
 ```
 
-Self-hosted sessions do not accept session `resources`. Configure skills on the agent. Use session metadata plus your own staging logic for repository or object-store inputs.
+Self-hosted sessions accept memory stores in session `resources`; repeat `--memory-store-id` to attach more than one. The SDK worker downloads them under `/mnt/memory/` and synchronizes changes. File and GitHub repository resources still require application-managed staging.
+
+```bash
+python3 example/run_session.py --direct-dispatch \
+  --memory-store-id memstore_... \
+  --follow-up "What durable context did you retain?"
+```
+
+### Browser chat with AG-UI
+
+The [`example/ag-ui/`](example/ag-ui/) example uses Anthropic's official adapter. One CopilotKit thread maps to one managed session, and text, thinking, tools, results, follow-ups, and interrupts stream through the UI while tools execute on Blaxel.
+
+```bash
+cd example/ag-ui
+npm ci
+npm run typecheck
+npm run dev
+```
 
 ### Agent-authored app with private preview and resume
 
@@ -230,7 +247,7 @@ Apply that exact plan:
 python3 cookbook.py cleanup --session sesn_... --apply
 ```
 
-Cleanup archives the session by default. It deletes the exact worker and optional Volume, then waits until each resource is absent. It retains the environment, agent, images, webhook, and orchestrator.
+Cleanup archives the session by default. It interrupts a running session when explicitly requested, force-stops matching active or queued work, deletes the exact worker and optional Volume, then waits until each resource is absent or terminal. It retains the environment, agent, images, webhook, and orchestrator.
 
 ## Production guardrails
 
@@ -239,6 +256,7 @@ Cleanup archives the session by default. It deletes the exact worker and optiona
 - Worker starts use bounded concurrency and bounded retries.
 - `/health` is liveness. `/ready` checks webhook and dispatcher configuration.
 - The control-plane API key never enters a worker.
+- The SDK prefers the session-scoped token in the work secret and uses the environment key as fallback; its bash environment scrubs both credentials from agent-run commands.
 - Proxy secret injection keeps third-party secrets out of worker environment variables.
 - A Volume is optional and session-scoped. Delete the worker before its Volume.
 - Requirements have minimum files for upgrades and hashed lock files for repeatable installs.
@@ -265,9 +283,9 @@ docker run --platform linux/amd64 --rm \
 This cookbook targets:
 
 - Anthropic Managed Agents beta header `managed-agents-2026-04-01`.
-- Anthropic Python SDK `0.121.0`.
-- Anthropic CLI `1.22.1`.
+- Anthropic Python SDK `1.x`.
+- Anthropic CLI `1.26.1` for local administration; sandbox workers use the SDK.
 - Blaxel Python SDK `0.4.1`.
 - Claude Sonnet 5 model ID `claude-sonnet-5`.
 
-Primary references: [Managed Agents sessions](https://platform.claude.com/docs/en/managed-agents/sessions), [events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming), [self-hosted sandboxes](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes), [Agent Skills](https://platform.claude.com/docs/en/managed-agents/skills), [multiagent orchestration](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration), and [Claude Sonnet 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5).
+Primary references: [Managed Agents sessions](https://platform.claude.com/docs/en/managed-agents/sessions), [events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming), [self-hosted sandboxes](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes), [memory](https://platform.claude.com/docs/en/managed-agents/memory), [Agent Skills](https://platform.claude.com/docs/en/managed-agents/skills), [multiagent orchestration](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration), and [Claude Sonnet 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5).

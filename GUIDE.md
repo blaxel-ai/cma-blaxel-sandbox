@@ -8,10 +8,10 @@ Use [README.md](README.md) for the shortest runnable path. This guide explains t
 | --- | --- |
 | Anthropic | Claude, agent configuration, session state, event history, skills, advisor threads, budgets, and the self-hosted work queue |
 | Blaxel orchestrator | Webhook verification, worker readiness, exact work claim, recovery dispatch, and process start |
-| Blaxel worker | `/workspace`, built-in tool execution, work heartbeat, result delivery, previews, and optional Volume or Proxy controls |
+| Blaxel worker | `/workspace`, SDK tool execution, memory synchronization, work heartbeat, result delivery, previews, and optional Volume or Proxy controls |
 | Your application | Session creation, user events, streamed output, receipts, input staging, and lifecycle policy |
 
-The orchestrator never runs agent tools. It creates or resumes the per-session worker, then starts `ant beta:worker run` for the exact `work_*` and `sesn_*` pair.
+The orchestrator never runs agent tools. It creates or resumes the per-session worker, then starts the SDK `EnvironmentWorker` for the exact `work_*` and `sesn_*` pair.
 
 ## Request lifecycle
 
@@ -28,7 +28,7 @@ sequenceDiagram
     O-->>CMA: 200 immediately
     O->>W: Create or resume session sandbox
     O->>CMA: Claim queued work
-    O->>W: Start ant worker for exact work and session
+    O->>W: Start SDK worker for exact work and session
     W->>CMA: Heartbeats and tool results
     CMA-->>App: Agent, usage, error, and idle events
     App->>CMA: List all event pages for final reconciliation
@@ -48,6 +48,7 @@ The event stream is the responsive path. The complete paginated event list is th
 | `ANTHROPIC_ENVIRONMENT_ID` | Self-hosted environment created by the setup script |
 | `ANTHROPIC_ENVIRONMENT_KEY` | Scoped work-queue and worker credential |
 | `ANTHROPIC_AGENT_ID` | Versioned agent configuration used by examples |
+| `ANTHROPIC_AGENT_VERSION` | Exact agent version used by the AG-UI adapter |
 | `ANTHROPIC_WEBHOOK_SIGNING_KEY` | Webhook verification secret |
 
 `bl push` uses the CLI login. `BL_API_KEY` does not replace `bl login`.
@@ -66,13 +67,13 @@ export ANTHROPIC_AGENT_SKILLS=xlsx,skill_01Example@latest
 python3 scripts/create_agent.py
 ```
 
-Changing these values creates a new agent. Save the printed ID before you start sessions.
+Changing these values creates a new agent. Save the printed ID and version before you start sessions.
 
 ### Skills and external inputs
 
 Managed Agent skills are agent configuration. The worker downloads them into its work directory. Use Anthropic skill names such as `xlsx`, or custom workspace IDs such as `skill_*`.
 
-Self-hosted sessions reject `resources`. Do not attach a GitHub repository as a session resource. Use one of these patterns:
+Self-hosted sessions accept `memory_store` resources at creation time. The SDK worker materializes them under `/mnt/memory/` and synchronizes changes. Self-hosted sessions do not mount uploaded files or GitHub repositories automatically. For those inputs:
 
 - Put reusable instructions in a Managed Agent custom skill.
 - Put an object URL or commit SHA in session metadata.
@@ -134,7 +135,7 @@ bl push --workspace "$BL_WORKSPACE" --type sandbox \
 
 Set `BLAXEL_WORKER_IMAGE=sandbox/cma-worker-full:latest` before you start or update the orchestrator.
 
-Both profiles contain `sandbox-api`, `ant`, `/workspace`, and `/mnt/session/outputs`. Both run `worker/smoke.sh` in CI.
+Both profiles contain `sandbox-api`, the hash-locked Anthropic SDK worker, `/workspace`, and `/mnt/memory`. Both run `worker/smoke.sh` in CI.
 
 ## Blaxel features
 
@@ -146,7 +147,7 @@ Transcript success proves the session. It does not prove which worker handled it
 bl get sandbox cma-worker-sesn-... process \
   --workspace "$BL_WORKSPACE" -o json
 
-bl logs sandbox cma-worker-sesn-... ant-run-... \
+bl logs sandbox cma-worker-sesn-... cma-run-... \
   --workspace "$BL_WORKSPACE" --period 1h
 ```
 
@@ -191,8 +192,8 @@ The orchestrator uses the secret to configure the sandbox network. It does not p
 ## Security boundaries
 
 - Keep `ANTHROPIC_API_KEY` local. Never send it to the orchestrator or worker.
-- The environment key enters the worker process. Agent shell commands can read worker environment variables.
-- Run workers without `--unrestricted-paths`. This limits file tools to `/workspace`.
+- The worker receives the environment key as a required fallback and prefers the session-scoped token carried by `ANTHROPIC_WORK_SECRET`. The SDK scrubs both from agent-run bash environments.
+- Keep the SDK worker's default restricted-path mode. This limits file tools to `/workspace`.
 - The path limit is not a shell sandbox. Bash can access other paths inside the container.
 - Keep preview apps private unless public access is required.
 - Verify the webhook signature before reading its event.
@@ -231,7 +232,7 @@ The default action archives the Anthropic session. Use `--session-action delete`
 | `requires_action` | A tool needs an external result or confirmation | Handle the event explicitly |
 | `retries_exhausted` | Managed retry policy ended | Inspect session errors and spans |
 | Stream disconnect | Live connection failed | Reconnect and list full event history |
-| No event progress | Worker stalled or froze | Interrupt and inspect `ant-run-*` logs |
+| No event progress | Worker stalled or froze | Interrupt and inspect `cma-run-*` logs |
 | Transcript pass without worker | Another claimant ran it | Use a quiet environment and direct dispatch |
 | `/ready` returns 503 | Signing or dispatcher config is incomplete | Fix the listed problem, then rerun setup |
 

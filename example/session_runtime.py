@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Callable
 
 from anthropic import AsyncAnthropic
@@ -168,25 +169,32 @@ class ManagedSessionRuntime:
         budget_cents: int | None = DEFAULT_BUDGET_CENTS,
         metadata: dict[str, str] | None = None,
         title: str | None = None,
+        resources: list[dict[str, Any]] | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "agent": agent_id,
             "environment_id": environment_id,
             "metadata": metadata or {"cookbook": "blaxel-cma"},
         }
+        if resources:
+            kwargs["resources"] = resources
         if budget_cents is not None:
             kwargs["budget"] = session_budget(budget_cents)
         if title:
             kwargs["title"] = title
         return await self.client.beta.sessions.create(**kwargs)
 
-    async def all_events(self, session_id: str) -> list[Any]:
-        """Return the authoritative event history across every API page."""
-        page = await self.client.beta.sessions.events.list(
-            session_id,
-            limit=100,
-            order="asc",
-        )
+    async def all_events(
+        self,
+        session_id: str,
+        *,
+        created_at_gte: str | None = None,
+    ) -> list[Any]:
+        """Return authoritative event history, optionally from a timestamp cursor."""
+        kwargs: dict[str, Any] = {"limit": 100, "order": "asc"}
+        if created_at_gte:
+            kwargs["created_at_gte"] = created_at_gte
+        page = await self.client.beta.sessions.events.list(session_id, **kwargs)
         return [event async for event in page]
 
     async def all_threads(self, session_id: str) -> list[Any]:
@@ -196,16 +204,35 @@ class ManagedSessionRuntime:
     async def queue_stats(self, environment_id: str) -> Any:
         return await self.client.beta.environments.work.stats(environment_id)
 
+    async def _raise_budget(self, session_id: str, requested_cents: int) -> None:
+        session = as_dict(await self.client.beta.sessions.retrieve(session_id))
+        amount = ((session.get("usage") or {}).get("list_cost") or {}).get("amount")
+        try:
+            consumed_cents = Decimal(str(amount))
+        except (InvalidOperation, TypeError):
+            raise SessionExecutionError(
+                f"cannot validate budget increase: invalid consumed list cost {amount!r}"
+            ) from None
+        if Decimal(requested_cents) <= consumed_cents:
+            raise SessionExecutionError(
+                f"resume budget {requested_cents} cents must exceed consumed list cost "
+                f"{consumed_cents} cents"
+            )
+        await self.client.beta.sessions.update(
+            session_id,
+            budget=session_budget(requested_cents),
+        )
+
     async def require_quiet_environment(self, environment_id: str) -> None:
         stats = as_dict(await self.queue_stats(environment_id))
         depth = stats.get("depth") or 0
         pending = stats.get("pending") or 0
         workers_polling = stats.get("workers_polling") or 0
-        if depth or pending or workers_polling:
+        if depth or pending:
             raise RuntimeError(
-                "example proof requires a quiet self-hosted environment "
+                "example proof requires an empty self-hosted work queue "
                 f"(depth={depth}, pending={pending}, workers_polling={workers_polling}). "
-                "Stop every other queue claimant or use a fresh environment."
+                "Wait for queued work to finish or use a fresh environment."
             )
 
     async def _send_message(self, session_id: str, message: str) -> None:
@@ -241,11 +268,35 @@ class ManagedSessionRuntime:
         baseline_ids: set[str],
         handled_budget_events: set[str],
         stall_timeout_seconds: float | None,
+        history: list[Any],
+        await_requires_action: bool,
     ) -> tuple[list[Any], str, bool]:
-        last_count = -1
+        events = list(history)
+        last_count = len(events)
         last_change = asyncio.get_running_loop().time()
         while True:
-            events = await self.all_events(session_id)
+            timestamps = [
+                str(as_dict(event).get("created_at"))
+                for event in events
+                if as_dict(event).get("created_at")
+            ]
+            batch = await self.all_events(
+                session_id,
+                created_at_gte=max(timestamps) if timestamps else None,
+            )
+            by_id = {
+                str(as_dict(event).get("id")): index
+                for index, event in enumerate(events)
+                if as_dict(event).get("id")
+            }
+            for event in batch:
+                event_id = str(as_dict(event).get("id") or "")
+                if event_id and event_id in by_id:
+                    events[by_id[event_id]] = event
+                else:
+                    events.append(event)
+                    if event_id:
+                        by_id[event_id] = len(events) - 1
             if len(events) != last_count:
                 last_count = len(events)
                 last_change = asyncio.get_running_loop().time()
@@ -284,15 +335,15 @@ class ManagedSessionRuntime:
                     await asyncio.sleep(self.poll_seconds)
                     continue
                 if resume_budget_cents and not budget_raised:
-                    await self.client.beta.sessions.update(
-                        session_id,
-                        budget=session_budget(resume_budget_cents),
-                    )
+                    await self._raise_budget(session_id, resume_budget_cents)
                     budget_raised = True
                     handled_budget_events.add(key)
                     print(f"  budget raised to {resume_budget_cents} cents; session resumed")
                 else:
                     return events, reason, budget_raised
+            elif reason == "requires_action" and await_requires_action:
+                await asyncio.sleep(self.poll_seconds)
+                continue
             elif reason:
                 return events, reason, budget_raised
             await asyncio.sleep(self.poll_seconds)
@@ -309,8 +360,8 @@ class ManagedSessionRuntime:
     ) -> SessionRun:
         """Send one turn, stream progress, and reconcile with complete history.
 
-        The stream is the fast path. A complete paginated list is the source of
-        truth after completion and the recovery path after a stream disconnect.
+        The stream is the fast path. Incremental paginated history reconciliation
+        is the source of truth after completion and after a stream disconnect.
         """
         sent = False
         budget_raised = False
@@ -367,16 +418,15 @@ class ManagedSessionRuntime:
                                 continue
                             reason = (item.get("stop_reason") or {}).get("type")
                             if reason == "budget_reached" and resume_budget_cents and not budget_raised:
-                                await self.client.beta.sessions.update(
-                                    session_id,
-                                    budget=session_budget(resume_budget_cents),
-                                )
+                                await self._raise_budget(session_id, resume_budget_cents)
                                 budget_raised = True
                                 stream_budget_occurrences += 1
                                 handled_budget_events.add(
                                     _budget_event_key(item, stream_budget_occurrences)
                                 )
                                 print(f"  budget raised to {resume_budget_cents} cents; session resumed")
+                                continue
+                            if reason == "requires_action" and on_started:
                                 continue
                             if reason:
                                 break
@@ -399,6 +449,8 @@ class ManagedSessionRuntime:
                     baseline_ids=baseline_ids,
                     handled_budget_events=handled_budget_events,
                     stall_timeout_seconds=stall_timeout_seconds,
+                    history=baseline,
+                    await_requires_action=on_started is not None,
                 )
                 if dispatch_task:
                     dispatch_result = await dispatch_task

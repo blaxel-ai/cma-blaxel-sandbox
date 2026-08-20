@@ -17,10 +17,9 @@ DEFAULT_BASE_URL = "https://api.anthropic.com"
 
 DEFAULT_AGENT_SYSTEM = (
     "You are a coding agent. Your working directory is /workspace. The file tools "
-    "(write/read/edit/glob/grep) are sandboxed to /workspace; absolute paths like "
-    "/workspace/hello.txt are REJECTED with \"absolute path not permitted\". Always "
-    "pass bare relative paths to file tools (\"hello.txt\", not \"/workspace/hello.txt\"). "
-    "Shell (bash) commands are unrestricted and use /workspace/... paths. Every tool "
+    "(write/read/edit/glob/grep) are sandboxed to /workspace. Use relative glob patterns; "
+    "read/write/edit may use absolute paths only inside /workspace. Shell (bash) "
+    "commands can access other paths inside the container, so treat them as unrestricted. Every tool "
     "call must produce non-empty output: if a shell command would print nothing "
     "(for example output redirected to a file), append a status echo such as && echo ok, "
     "because an empty tool result is rejected by the API."
@@ -111,10 +110,11 @@ def agent_payload(
     if skills:
         payload["skills"] = skills
     if advisor_model:
+        # This cookbook demonstrates delegated advisor review, not recursive
+        # coordinator self-invocation, so the optional {"type": "self"} is omitted.
         payload["multiagent"] = {
             "type": "coordinator",
             "agents": [
-                {"type": "self"},
                 {"type": "advisor", "model": advisor_model},
             ],
         }

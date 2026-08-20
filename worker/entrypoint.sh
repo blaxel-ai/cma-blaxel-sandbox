@@ -23,6 +23,6 @@ wait_for_port() {
 
 wait_for_port 8080
 
-# The orchestrator starts `ant beta:worker run` via the sandbox process API for
+# The orchestrator starts `/worker/worker.py` via the sandbox process API for
 # each claimed work item, so we just keep sandbox-api alive here.
 wait

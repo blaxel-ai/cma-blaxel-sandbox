@@ -34,6 +34,7 @@ ENV_PATH = REPO / ".env"
 ENV_ID = "ANTHROPIC_ENVIRONMENT_ID"
 ENV_KEY = "ANTHROPIC_ENVIRONMENT_KEY"
 AGENT_ID = "ANTHROPIC_AGENT_ID"
+AGENT_VERSION = "ANTHROPIC_AGENT_VERSION"
 SIGNING_KEY = "ANTHROPIC_WEBHOOK_SIGNING_KEY"
 
 _ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
@@ -206,10 +207,13 @@ def _do_provision(env: dict[str, str]) -> None:
     print("\n-> creating the agent ...")
     _, out = _capture([sys.executable, str(REPO / "scripts" / "create_agent.py")], env)
     value = extract_export(out, AGENT_ID)
-    if not value:
-        _die("could not read the new agent id from create_agent.py output")
+    version = extract_export(out, AGENT_VERSION)
+    if not value or not version:
+        _die("could not read the new agent id and version from create_agent.py output")
     if append_export(ENV_PATH, AGENT_ID, value):
         print(f"   saved {AGENT_ID} to .env")
+    if append_export(ENV_PATH, AGENT_VERSION, version):
+        print(f"   saved {AGENT_VERSION} to .env")
     env = merged_env(env, ENV_PATH)  # so the proof below sees the new agent id
 
     print("\n-> proving the worker (creates a real session + worker sandbox) ...")

@@ -9,8 +9,8 @@ Design:
   - The background dispatcher readies the session sandbox before claiming work.
   - For each claimed session work item, start one Blaxel worker sandbox process
     bound to that exact work id and session id.
-  - The worker runs `ant beta:worker run`; it heartbeats and stops the claimed
-    work item itself. TTL is a max-age cleanup backstop.
+  - The worker runs the SDK EnvironmentWorker; it heartbeats and stops the
+    claimed work item itself. TTL is a max-age cleanup backstop.
 
 Running in a sandbox gives the webhook a public preview URL and lets the
 process resume with the sandbox on the next inbound webhook.
@@ -47,10 +47,10 @@ worker_image = os.environ.get("BLAXEL_WORKER_IMAGE", "sandbox/cma-worker:latest"
 # backstop, not idle-based. For idle-based cleanup, use a `ttl-idle` lifecycle policy
 # instead (see Blaxel docs; not exposed in the installed SDK build).
 worker_ttl = os.environ.get("BLAXEL_WORKER_TTL", "2h")
-# `ant beta:worker run --max-idle` stops after the session goes idle with
+# The SDK EnvironmentWorker stops after the session goes idle with
 # stop_reason=end_turn. 0 disables the timeout.
 worker_max_idle = os.environ.get("ANT_MAX_IDLE", "60s")
-# keep_alive holds the worker sandbox active while `ant run` serves the session.
+# keep_alive holds the worker sandbox active while the SDK worker serves the session.
 # Without it the sandbox can standby while the worker is making outbound calls.
 # Bounds a stuck session; set ANT_KEEPALIVE_TIMEOUT=0 to run until natural exit.
 worker_keepalive_timeout = int(os.environ.get("ANT_KEEPALIVE_TIMEOUT", "3600"))
@@ -90,10 +90,13 @@ def _worker_name(session_id: str) -> str:
     return f"cma-worker-{safe_id[:40]}"
 
 
-def _process_name(work_id: str, unique_suffix: str | None = None) -> str:
+def _process_prefix(work_id: str) -> str:
     safe_id = re.sub(r"[^a-z0-9-]", "-", work_id.lower())
-    suffix = unique_suffix or uuid4().hex[:8]
-    return f"ant-run-{safe_id[:40]}-{suffix}"
+    return f"cma-run-{safe_id[:40]}-"
+
+
+def _process_name(work_id: str, unique_suffix: str | None = None) -> str:
+    return f"{_process_prefix(work_id)}{unique_suffix or uuid4().hex[:8]}"
 
 
 def _duration_to_seconds(value: str, default: int) -> int:
@@ -131,7 +134,7 @@ async def _wait_for_worker_ready(worker, name: str) -> bool:
         try:
             await worker.process.exec({
                 "name": f"probe-{uuid4().hex[:8]}",
-                "command": "node -v",
+                "command": "python3 -c 'from anthropic.lib.environments import EnvironmentWorker'",
                 "wait_for_completion": True,
             })
             return True
@@ -266,25 +269,54 @@ async def _dispatch_work_item(work, *, prepared_worker=None) -> bool:
 
     name = _worker_name(session_id)
     process_name = _process_name(work.id)
+    try:
+        active = [
+            process
+            for process in await worker.process.list()
+            if str(getattr(process, "status", "")) == "running"
+            and str(getattr(process, "name", "")).startswith("cma-run-")
+        ]
+    except Exception as exc:
+        logger.warning("could not inspect active CMA processes in %s: %r", name, exc)
+        active = []
+    if active:
+        active_names = [str(getattr(process, "name", "")) for process in active]
+        if any(process.startswith(_process_prefix(work.id)) for process in active_names):
+            logger.info("work %s already has a live worker process", work.id)
+            _work_ids_in_flight.discard(work.id)
+            return True
+        logger.info(
+            "session %s already has live worker %s; stopping duplicate work %s",
+            session_id,
+            active_names[0],
+            work.id,
+        )
+        await _stop_work(work, force=True)
+        _work_ids_in_flight.discard(work.id)
+        return True
+
     process_env = {
         "ANTHROPIC_WORK_ID": work.id,
         "ANTHROPIC_SESSION_ID": session_id,
         "ANTHROPIC_ENVIRONMENT_ID": getattr(work, "environment_id", environment_id),
         "ANTHROPIC_ENVIRONMENT_KEY": environment_key,
+        "ANT_MAX_IDLE": worker_max_idle,
     }
+    work_secret = getattr(work, "secret", None)
+    if work_secret:
+        process_env["ANTHROPIC_WORK_SECRET"] = str(work_secret)
     if base_url := os.environ.get("ANTHROPIC_BASE_URL"):
         process_env["ANTHROPIC_BASE_URL"] = base_url
 
-    # Do not heartbeat here. `ant beta:worker run` owns the first heartbeat for
-    # the claimed item; a dispatcher-side heartbeat would change the expected
-    # lease token and can make the stock worker lose the handoff. Keep this gap
-    # short by readying the sandbox before the SDK claim and bounding retries.
+    # Do not heartbeat here. The SDK EnvironmentWorker owns the first heartbeat;
+    # a dispatcher-side heartbeat would change the expected lease token. Keep
+    # this gap short by readying the sandbox before the SDK claim and bounding retries.
     try:
         for attempt in range(worker_run_attempts):
             try:
                 await worker.process.exec({
                     "name": process_name,
-                    "command": f"ant beta:worker run --workdir /workspace --max-idle {worker_max_idle}",
+                    "command": "python3 /worker/worker.py",
                     "wait_for_completion": False,
                     "keep_alive": True,
                     "timeout": worker_keepalive_timeout,
@@ -300,18 +332,18 @@ async def _dispatch_work_item(work, *, prepared_worker=None) -> bool:
             except Exception as exc:
                 if attempt in (0, 4, 9, worker_run_attempts - 1):
                     logger.warning(
-                        "worker %s ant run start attempt %d failed: %r",
+                        "worker %s SDK worker start attempt %d failed: %r",
                         name,
                         attempt + 1,
                         exc,
                     )
                 await asyncio.sleep(2)
-        logger.error("worker %s never accepted ant run command %s", name, process_name)
+        logger.error("worker %s never accepted SDK worker command %s", name, process_name)
         await _stop_work(work, force=True)
         return False
     finally:
         # This set only protects the local claim-to-process-start handoff. Once
-        # Blaxel accepts the process, `ant run` owns the lease. If it dies before
+        # Blaxel accepts the process, the SDK worker owns the lease. If it dies before
         # heartbeating, Anthropic reclaim must be able to re-deliver this work id.
         _work_ids_in_flight.discard(work.id)
 

@@ -53,29 +53,34 @@ def test_worker_name_bounded_length():
 
 def test_process_name_uses_work_id_and_valid_chars():
     name = app._process_name("work__01.AB/xy", unique_suffix="abc123ef")
-    assert name == "ant-run-work--01-ab-xy-abc123ef"
+    assert name == "cma-run-work--01-ab-xy-abc123ef"
     assert re.fullmatch(r"[a-z0-9-]+", name), name
 
 
-def _session_work(work_id="work_1", session_id="sesn_x"):
+def _session_work(work_id="work_1", session_id="sesn_x", secret=None):
     return SimpleNamespace(
         id=work_id,
         environment_id="env_test",
+        secret=secret,
         data=SimpleNamespace(type="session", id=session_id),
     )
 
 
 class FakeProcess:
-    def __init__(self, fail_run=False, order=None):
+    def __init__(self, fail_run=False, order=None, active=None):
         self.calls = []
         self.fail_run = fail_run
         self.order = order
+        self.active = active or []
+
+    async def list(self):
+        return self.active
 
     async def exec(self, spec):
         self.calls.append(spec)
         if self.order is not None:
             self.order.append(("exec", spec["command"]))
-        if self.fail_run and "ant beta:worker run" in spec.get("command", ""):
+        if self.fail_run and "/worker/worker.py" in spec.get("command", ""):
             raise RuntimeError("run failed")
         return SimpleNamespace(logs="ok")
 
@@ -114,7 +119,7 @@ def stop_calls(monkeypatch):
     return calls
 
 
-async def test_dispatch_work_item_starts_ant_run_with_work_and_session_env(fake_sandbox):
+async def test_dispatch_work_item_starts_sdk_worker_with_work_and_session_env(fake_sandbox):
     work = _session_work(work_id="work_123", session_id="sesn_ABC")
 
     assert await app._dispatch_work_item(work) is True
@@ -126,9 +131,9 @@ async def test_dispatch_work_item_starts_ant_run_with_work_and_session_env(fake_
         "ttl": app.worker_ttl,
     }]
     probe, run = fake_sandbox.process.calls
-    assert probe["command"] == "node -v"
-    assert run["name"].startswith("ant-run-work-123-")
-    assert run["command"] == f"ant beta:worker run --workdir /workspace --max-idle {app.worker_max_idle}"
+    assert "EnvironmentWorker" in probe["command"]
+    assert run["name"].startswith("cma-run-work-123-")
+    assert run["command"] == "python3 /worker/worker.py"
     assert run["wait_for_completion"] is False
     assert run["keep_alive"] is True
     assert run["timeout"] == app.worker_keepalive_timeout
@@ -136,10 +141,21 @@ async def test_dispatch_work_item_starts_ant_run_with_work_and_session_env(fake_
     assert run["env"]["ANTHROPIC_SESSION_ID"] == "sesn_ABC"
     assert run["env"]["ANTHROPIC_ENVIRONMENT_ID"] == "env_test"
     assert run["env"]["ANTHROPIC_ENVIRONMENT_KEY"] == app.environment_key
+    assert run["env"]["ANT_MAX_IDLE"] == app.worker_max_idle
     assert "BLAXEL_WORKER_PROXY_SECRET_VALUE" not in run["env"]
 
 
-async def test_dispatch_does_not_heartbeat_before_ant_run(monkeypatch):
+async def test_dispatch_forwards_session_scoped_work_secret_with_fallback(fake_sandbox):
+    work = _session_work(work_id="work_secret", session_id="sesn_secret", secret="encoded-secret")
+
+    assert await app._dispatch_work_item(work) is True
+
+    _, run = fake_sandbox.process.calls
+    assert run["env"]["ANTHROPIC_WORK_SECRET"] == "encoded-secret"
+    assert run["env"]["ANTHROPIC_ENVIRONMENT_KEY"] == app.environment_key
+
+
+async def test_dispatch_does_not_heartbeat_before_sdk_worker(monkeypatch):
     heartbeat_calls = []
     process = FakeProcess()
     prepared_worker = SimpleNamespace(process=process)
@@ -163,9 +179,7 @@ async def test_dispatch_does_not_heartbeat_before_ant_run(monkeypatch):
     ) is True
 
     assert heartbeat_calls == []
-    assert process.calls[0]["command"] == (
-        f"ant beta:worker run --workdir /workspace --max-idle {app.worker_max_idle}"
-    )
+    assert process.calls[0]["command"] == "python3 /worker/worker.py"
 
 
 async def test_dispatch_work_item_uses_prepared_worker_without_readiness_probe(fake_sandbox):
@@ -179,9 +193,31 @@ async def test_dispatch_work_item_uses_prepared_worker_without_readiness_probe(f
 
     assert fake_sandbox.created_specs == []
     assert len(process.calls) == 1
-    assert process.calls[0]["command"] == (
-        f"ant beta:worker run --workdir /workspace --max-idle {app.worker_max_idle}"
-    )
+    assert process.calls[0]["command"] == "python3 /worker/worker.py"
+
+
+async def test_dispatch_stops_new_work_when_session_worker_is_already_live(monkeypatch, stop_calls):
+    process = FakeProcess(active=[SimpleNamespace(name="cma-run-work-old-abc", status="running")])
+    prepared_worker = SimpleNamespace(process=process)
+    work = _session_work(work_id="work_new", session_id="sesn_dup")
+
+    assert await app._dispatch_work_item(work, prepared_worker=prepared_worker) is True
+
+    assert stop_calls == [("work_new", "env_test", True)]
+    assert process.calls == []
+    assert "work_new" not in app._work_ids_in_flight
+
+
+async def test_dispatch_recognizes_reclaimed_work_already_running(stop_calls):
+    process = FakeProcess(active=[SimpleNamespace(name="cma-run-work-same-abc", status="running")])
+    prepared_worker = SimpleNamespace(process=process)
+    work = _session_work(work_id="work_same", session_id="sesn_same")
+
+    assert await app._dispatch_work_item(work, prepared_worker=prepared_worker) is True
+
+    assert stop_calls == []
+    assert process.calls == []
+    assert "work_same" not in app._work_ids_in_flight
 
 
 async def test_dispatch_suppresses_currently_in_flight_work_id(fake_sandbox):
@@ -192,7 +228,7 @@ async def test_dispatch_suppresses_currently_in_flight_work_id(fake_sandbox):
 
     assert await app._dispatch_work_item(work, prepared_worker=prepared_worker) is True
 
-    run_calls = [c for c in process.calls if "ant beta:worker run" in c["command"]]
+    run_calls = [c for c in process.calls if "/worker/worker.py" in c["command"]]
     assert len(run_calls) == 0
     assert fake_sandbox.created_specs == []
 
@@ -206,10 +242,10 @@ async def test_successful_dispatch_clears_in_flight_for_reclaim_redelivery(fake_
     assert "work_reclaim" not in app._work_ids_in_flight
     assert await app._dispatch_work_item(work, prepared_worker=prepared_worker) is True
 
-    run_calls = [c for c in process.calls if "ant beta:worker run" in c["command"]]
+    run_calls = [c for c in process.calls if "/worker/worker.py" in c["command"]]
     assert len(run_calls) == 2
-    assert run_calls[0]["name"].startswith("ant-run-work-reclaim-")
-    assert run_calls[1]["name"].startswith("ant-run-work-reclaim-")
+    assert run_calls[0]["name"].startswith("cma-run-work-reclaim-")
+    assert run_calls[1]["name"].startswith("cma-run-work-reclaim-")
     assert run_calls[0]["name"] != run_calls[1]["name"]
     assert fake_sandbox.created_specs == []
 

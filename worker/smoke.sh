@@ -24,16 +24,17 @@ profile="${CMA_WORKER_PROFILE:-quickstart}"
 case "$profile" in quickstart|full) ;; *) fail "unknown profile $profile" ;; esac
 ok "profile $profile"
 
-for bin in bash python3 pip uv node npm pnpm git curl wget jq tar zip unzip ssh rg tree sed awk grep diff patch nc ant sandbox-api; do
+for bin in bash python3 pip uv node npm pnpm git curl wget jq tar zip unzip ssh rg tree sed awk grep diff patch nc sandbox-api; do
     command -v "$bin" >/dev/null 2>&1 || fail "missing $bin"
 done
 ok "core tools present"
 
 require_min_version "Python" "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")')" "3.12"
 require_min_version "Node.js" "$(node -p 'process.versions.node')" "22"
-require_min_version "ant CLI" "$(ant --version 2>/dev/null | awk 'NR == 1 {print $NF}' | sed 's/^v//')" "1.22.1"
-ant beta:worker run --help >/dev/null 2>&1 || fail "ant beta:worker run subcommand missing"
-ok "ant beta:worker run available"
+require_min_version "Anthropic SDK" "$(python3 -c 'import anthropic; print(anthropic.__version__)')" "1.0.0"
+python3 -m py_compile /worker/worker.py || fail "worker.py does not compile"
+python3 -c 'from anthropic.lib.environments import EnvironmentWorker' || fail "EnvironmentWorker missing"
+ok "SDK EnvironmentWorker available"
 
 if [ "$profile" = "full" ]; then
     for bin in go rustc cargo java mvn gradle ruby bundle gem php composer gcc g++ make cmake psql redis-cli docker tmux screen htop vim nano; do
@@ -49,7 +50,7 @@ if [ "$profile" = "full" ]; then
 fi
 
 [ -d /workspace ] || fail "/workspace missing"
-[ -d /mnt/session/outputs ] || fail "/mnt/session/outputs missing"
+[ -d /mnt/memory ] || fail "/mnt/memory missing"
 (echo smoke > /workspace/.smoke && rm -f /workspace/.smoke) || fail "/workspace not writable"
 ok "workspace contract"
 echo "WORKER IMAGE SMOKE: PASS"
