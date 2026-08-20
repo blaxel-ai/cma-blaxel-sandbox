@@ -201,7 +201,11 @@ async def _delete_if_present(delete, get, name: str, *, timeout_seconds: float) 
 async def _stop_session_work(client, environment_id: str, session_id: str) -> int:
     """Force-stop active or queued work before deleting its worker sandbox."""
     page = await client.beta.environments.work.list(environment_id, limit=100)
-    works = [work async for work in page] if hasattr(page, "__aiter__") else getattr(page, "data", [])
+    works = (
+        [work async for work in page]
+        if hasattr(page, "__aiter__")
+        else (getattr(page, "data", None) or [])
+    )
     stopped = 0
     for work in works:
         data = getattr(work, "data", None)

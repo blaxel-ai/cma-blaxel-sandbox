@@ -122,6 +122,19 @@ async def test_cleanup_waits_for_interrupt_to_settle_before_deleting_worker(monk
     ]
 
 
+async def test_stop_session_work_accepts_null_page_data():
+    async def list_work(environment_id, *, limit):
+        return SimpleNamespace(data=None)
+
+    client = SimpleNamespace(
+        beta=SimpleNamespace(
+            environments=SimpleNamespace(work=SimpleNamespace(list=list_work)),
+        ),
+    )
+
+    assert await cookbook._stop_session_work(client, "env_x", "sesn_x") == 0
+
+
 async def test_wait_until_missing_accepts_a_terminal_tombstone():
     calls = 0
 
