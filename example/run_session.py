@@ -205,7 +205,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 async def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    required = ["ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_AGENT_ID"]
+    required = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_ENVIRONMENT_ID",
+        "ANTHROPIC_AGENT_ID",
+        "ANTHROPIC_AGENT_VERSION",
+    ]
     if args.direct_dispatch:
         required.extend(["ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"])
     for name in required:
@@ -236,6 +241,7 @@ async def main(argv: list[str] | None = None) -> None:
     ] or None
     session = await runtime.create_session(
         agent_id=os.environ["ANTHROPIC_AGENT_ID"],
+        agent_version=int(os.environ["ANTHROPIC_AGENT_VERSION"]),
         environment_id=environment_id,
         budget_cents=budget_cents,
         metadata={"cookbook": "blaxel-cma", "scenario": args.scenario},

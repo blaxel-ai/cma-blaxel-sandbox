@@ -165,14 +165,17 @@ class ManagedSessionRuntime:
         self,
         *,
         agent_id: str,
+        agent_version: int,
         environment_id: str,
         budget_cents: int | None = DEFAULT_BUDGET_CENTS,
         metadata: dict[str, str] | None = None,
         title: str | None = None,
         resources: list[dict[str, Any]] | None = None,
     ) -> Any:
+        if agent_version < 1:
+            raise ValueError("agent_version must be a positive integer")
         kwargs: dict[str, Any] = {
-            "agent": agent_id,
+            "agent": {"type": "agent", "id": agent_id, "version": agent_version},
             "environment_id": environment_id,
             "metadata": metadata or {"cookbook": "blaxel-cma"},
         }

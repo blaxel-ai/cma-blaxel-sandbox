@@ -161,6 +161,7 @@ async def test_direct_dispatch_runs_for_initial_and_follow_up_turns(monkeypatch)
         "BL_WORKSPACE",
     ):
         monkeypatch.setenv(name, "test")
+    monkeypatch.setenv("ANTHROPIC_AGENT_VERSION", "1")
 
     await run_session.main(["--direct-dispatch", "--follow-up", "again"])
 

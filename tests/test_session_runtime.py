@@ -103,9 +103,11 @@ async def test_create_session_forwards_memory_store_resources():
     resources = [{"type": "memory_store", "memory_store_id": "mem_x", "access": "read_write"}]
     await runtime.create_session(
         agent_id="agent_x",
+        agent_version=7,
         environment_id="env_x",
         resources=resources,
     )
+    assert calls[0]["agent"] == {"type": "agent", "id": "agent_x", "version": 7}
     assert calls[0]["resources"] == resources
 
 
