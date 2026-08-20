@@ -2,7 +2,7 @@
 
 Only the dispatch (claim) step runs here. It mirrors the orchestrator's true
 per-session path: claim exact CMA work with the SDK, then run that work in the
-matching Blaxel sandbox with `ant beta:worker run`. The worker itself always
+matching Blaxel sandbox with the SDK EnvironmentWorker. The worker itself always
 runs in a Blaxel sandbox, never on this machine.
 """
 from __future__ import annotations
@@ -49,10 +49,13 @@ def worker_name(session_id: str) -> str:
     return f"cma-worker-{safe_id[:40]}"
 
 
-def process_name(work_id: str, unique_suffix: str | None = None) -> str:
+def process_prefix(work_id: str) -> str:
     safe_id = re.sub(r"[^a-z0-9-]", "-", work_id.lower())
-    suffix = unique_suffix or uuid4().hex[:8]
-    return f"ant-run-{safe_id[:40]}-{suffix}"
+    return f"cma-run-{safe_id[:40]}-"
+
+
+def process_name(work_id: str, unique_suffix: str | None = None) -> str:
+    return f"{process_prefix(work_id)}{unique_suffix or uuid4().hex[:8]}"
 
 
 def work_session_id(work) -> str | None:
@@ -68,7 +71,7 @@ async def wait_for_worker_ready(worker, sandbox_name: str, attempts: int = 45) -
         try:
             await worker.process.exec({
                 "name": f"probe-{uuid4().hex[:8]}",
-                "command": "node -v",
+                "command": "python3 -c 'from anthropic.lib.environments import EnvironmentWorker'",
                 "wait_for_completion": True,
             })
             return
@@ -101,6 +104,18 @@ async def stop_work(client: AsyncAnthropic, work, *, force: bool = True) -> None
         environment_id=work.environment_id,
         force=force,
     )
+
+
+async def active_cma_processes(worker) -> list[str]:
+    try:
+        return [
+            str(getattr(process, "name", ""))
+            for process in await worker.process.list()
+            if str(getattr(process, "status", "")) == "running"
+            and str(getattr(process, "name", "")).startswith("cma-run-")
+        ]
+    except Exception:
+        return []
 
 
 def mark_work_in_flight(work_id: str) -> bool:
@@ -136,21 +151,36 @@ async def dispatch_work_item(
         raise
 
     proc_name = process_name(work.id)
+    active = await active_cma_processes(worker)
+    if active:
+        active_name = active[0]
+        if not any(name.startswith(process_prefix(work.id)) for name in active):
+            await stop_work(client, work, force=True)
+            print(f"[{label}] reused live session worker {active_name}; stopped duplicate {work.id}")
+        else:
+            print(f"[{label}] {work.id} is already running as {active_name}")
+        _work_ids_in_flight.discard(work.id)
+        return DispatchResult(work.id, session_id, sandbox_name, active_name, worker)
+
     env = {
         "ANTHROPIC_WORK_ID": work.id,
         "ANTHROPIC_SESSION_ID": session_id,
         "ANTHROPIC_ENVIRONMENT_ID": work.environment_id,
         "ANTHROPIC_ENVIRONMENT_KEY": os.environ["ANTHROPIC_ENVIRONMENT_KEY"],
+        "ANT_MAX_IDLE": WORKER_MAX_IDLE,
     }
+    work_secret = getattr(work, "secret", None)
+    if work_secret:
+        env["ANTHROPIC_WORK_SECRET"] = str(work_secret)
     if base_url := os.environ.get("ANTHROPIC_BASE_URL"):
         env["ANTHROPIC_BASE_URL"] = base_url
 
     try:
-        # `ant beta:worker run` must own the first heartbeat for this work item.
+        # The SDK EnvironmentWorker must own the first heartbeat for this item.
         # The host readies the sandbox before claiming so this handoff is short.
         await worker.process.exec({
             "name": proc_name,
-            "command": f"ant beta:worker run --workdir /workspace --max-idle {WORKER_MAX_IDLE}",
+            "command": "python3 /worker/worker.py",
             "wait_for_completion": False,
             "keep_alive": True,
             "timeout": KEEPALIVE_TIMEOUT,
@@ -229,6 +259,15 @@ async def dispatch_until_session_work(
     timeout_s: float = 30.0,
 ) -> DispatchResult:
     prepared_worker = await ready_worker_for_session(session_id)
+    if active := await active_cma_processes(prepared_worker):
+        print(f"[{label}] reusing live session worker {active[0]}")
+        return DispatchResult(
+            work_id="active",
+            session_id=session_id,
+            sandbox_name=worker_name(session_id),
+            process_name=active[0],
+            worker=prepared_worker,
+        )
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:
         results = await dispatch_available_work(

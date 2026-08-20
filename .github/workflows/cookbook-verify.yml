@@ -47,6 +47,37 @@ jobs:
       - name: Check operations CLI
         run: python cookbook.py --help
 
+  ag-ui:
+    name: AG-UI typecheck and build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: example/ag-ui
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: example/ag-ui/package-lock.json
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Reject moderate or higher advisories
+        run: npm audit --omit=dev --audit-level=moderate
+
   image-smoke:
     name: Worker ${{ matrix.profile }} image smoke
     runs-on: ubuntu-latest

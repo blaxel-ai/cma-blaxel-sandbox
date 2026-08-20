@@ -40,6 +40,11 @@ def is_missing_error(exc: Exception) -> bool:
     return "404" in message or "not found" in message
 
 
+def resource_is_terminal(resource: Any) -> bool:
+    status = str(getattr(resource, "status", "") or as_dict(resource).get("status") or "").lower()
+    return status in {"deleted", "terminated"}
+
+
 async def wait_until_missing(
     get_resource: Callable[[str], Awaitable[Any]],
     name: str,
@@ -50,7 +55,9 @@ async def wait_until_missing(
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
-            await get_resource(name)
+            resource = await get_resource(name)
+            if resource_is_terminal(resource):
+                return
         except Exception as exc:
             if is_missing_error(exc):
                 return
@@ -179,14 +186,40 @@ async def status() -> None:
 
 async def _delete_if_present(delete, get, name: str, *, timeout_seconds: float) -> str:
     try:
-        await get(name)
+        resource = await get(name)
+        if resource_is_terminal(resource):
+            return "already inactive"
     except Exception as exc:
         if is_missing_error(exc):
             return "already absent"
         raise
     await delete(name)
     await wait_until_missing(get, name, timeout_seconds=timeout_seconds)
-    return "deleted and confirmed absent"
+    return "deleted and confirmed inactive"
+
+
+async def _stop_session_work(client, environment_id: str, session_id: str) -> int:
+    """Force-stop active or queued work before deleting its worker sandbox."""
+    page = await client.beta.environments.work.list(environment_id, limit=100)
+    works = (
+        [work async for work in page]
+        if hasattr(page, "__aiter__")
+        else (getattr(page, "data", None) or [])
+    )
+    stopped = 0
+    for work in works:
+        data = getattr(work, "data", None)
+        if getattr(data, "type", None) != "session" or getattr(data, "id", None) != session_id:
+            continue
+        if getattr(work, "state", None) in {"stopped", "completed"}:
+            continue
+        await client.beta.environments.work.stop(
+            work.id,
+            environment_id=environment_id,
+            force=True,
+        )
+        stopped += 1
+    return stopped
 
 
 async def cleanup(args: argparse.Namespace) -> None:
@@ -200,6 +233,7 @@ async def cleanup(args: argparse.Namespace) -> None:
         "session": args.session,
         "session_action": args.session_action,
         "interrupt_running_session": args.interrupt,
+        "work_action": "force-stop matching active or queued items",
         "sandbox": sandbox,
         "volume": None if args.keep_volume else volume,
     }
@@ -209,7 +243,12 @@ async def cleanup(args: argparse.Namespace) -> None:
         print("\nPlan only. Add --apply to execute these exact actions.")
         return
 
-    for name in ("ANTHROPIC_API_KEY", "BL_WORKSPACE"):
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_ENVIRONMENT_ID",
+        "ANTHROPIC_ENVIRONMENT_KEY",
+        "BL_WORKSPACE",
+    ):
         if not os.environ.get(name):
             raise SystemExit(f"missing required env: {name}")
     client = AsyncAnthropic()
@@ -231,6 +270,16 @@ async def cleanup(args: argparse.Namespace) -> None:
             timeout_seconds=args.wait_seconds,
         )
         print(f"session: interrupt settled ({settled_state})")
+
+    async with AsyncAnthropic(
+        auth_token=os.environ["ANTHROPIC_ENVIRONMENT_KEY"]
+    ) as environment_client:
+        stopped_work = await _stop_session_work(
+            environment_client,
+            os.environ["ANTHROPIC_ENVIRONMENT_ID"],
+            args.session,
+        )
+    print(f"work: stopped {stopped_work} matching item(s)")
 
     print(
         "sandbox:",

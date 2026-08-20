@@ -18,12 +18,13 @@ def test_environment_payload_is_self_hosted():
     }
 
 
-def test_agent_payload_uses_builtin_agent_toolset_and_relative_path_prompt():
+def test_agent_payload_uses_builtin_agent_toolset_and_workspace_path_prompt():
     payload = cma_setup.agent_payload("Coding Assistant", "claude-opus-5")
     assert payload["name"] == "Coding Assistant"
     assert payload["model"] == "claude-opus-5"
     assert payload["tools"] == [{"type": "agent_toolset_20260401"}]
-    assert "absolute paths like /workspace/hello.txt are REJECTED" in payload["system"]
+    assert "read/write/edit may use absolute paths only inside /workspace" in payload["system"]
+    assert "Use relative glob patterns" in payload["system"]
     assert "Every tool call must produce non-empty output" in payload["system"]
     assert payload["metadata"] == {"cookbook": "blaxel-cma"}
 
@@ -40,7 +41,6 @@ def test_agent_payload_supports_pinned_inference_and_advisor():
     assert payload["multiagent"] == {
         "type": "coordinator",
         "agents": [
-            {"type": "self"},
             {"type": "advisor", "model": "claude-opus-5"},
         ],
     }
@@ -94,6 +94,50 @@ def test_preflight_summarizes_json_command_output():
     assert preflight._command_detail("[]") == "reachable (0 resources)"
     assert preflight._command_detail('[{"metadata": {"name": "one"}}]') == "reachable (1 resources)"
     assert preflight._command_detail('{"status": "ok"}') == "reachable"
+
+
+def test_create_agent_exports_id_and_integer_version(monkeypatch, capsys):
+    monkeypatch.delenv("ANTHROPIC_AGENT_ID", raising=False)
+    monkeypatch.setattr(
+        create_agent,
+        "request_json",
+        lambda *args, **kwargs: (200, {"id": "agent_x", "version": 7}),
+    )
+    create_agent.main()
+    output = capsys.readouterr().out
+    assert "export ANTHROPIC_AGENT_ID=agent_x" in output
+    assert "export ANTHROPIC_AGENT_VERSION=7" in output
+
+
+def test_create_agent_recovers_version_for_existing_agent(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_AGENT_ID", "agent_existing")
+    monkeypatch.setattr(
+        create_agent,
+        "request_json",
+        lambda method, path, **kwargs: (200, {"id": "agent_existing", "version": 9}),
+    )
+
+    create_agent.main()
+
+    output = capsys.readouterr().out
+    assert "export ANTHROPIC_AGENT_ID=agent_existing" in output
+    assert "export ANTHROPIC_AGENT_VERSION=9" in output
+
+
+def test_create_agent_archives_incomplete_response(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_AGENT_ID", raising=False)
+    calls = []
+
+    def request(method, path, **kwargs):
+        calls.append((method, path))
+        if method == "POST":
+            return 200, {"id": "agent_incomplete"}
+        return 204, None
+
+    monkeypatch.setattr(create_agent, "request_json", request)
+    with pytest.raises(cma_setup.SetupError, match="agent_incomplete archived"):
+        create_agent.main()
+    assert calls[-1] == ("POST", "/v1/agents/agent_incomplete/archive")
 
 
 def test_agent_create_error_hints_when_model_is_rejected():

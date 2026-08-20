@@ -64,7 +64,7 @@ async def ant_run_process_name(sandbox) -> str | None:
     names = [
         name
         for process in processes
-        if (name := getattr(process, "name", "") or "").startswith("ant-run-")
+        if (name := getattr(process, "name", "") or "").startswith("cma-run-")
     ]
     return names[-1] if names else None
 
@@ -152,7 +152,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="verified cookbook scenario to run",
     )
     parser.add_argument("--message", help="override the scenario prompt; scenario checks still apply")
+    parser.add_argument(
+        "--follow-up",
+        action="append",
+        default=[],
+        help="send another turn to the same managed session; repeatable",
+    )
     parser.add_argument("--skill-name", help="skill name or purpose for --scenario skill")
+    parser.add_argument(
+        "--memory-store-id",
+        action="append",
+        default=[],
+        help="attach a read-write memory store to this self-hosted session; repeatable",
+    )
     parser.add_argument(
         "--direct-dispatch",
         action="store_true",
@@ -193,7 +205,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 async def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    required = ["ANTHROPIC_API_KEY", "ANTHROPIC_ENVIRONMENT_ID", "ANTHROPIC_AGENT_ID"]
+    required = [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_ENVIRONMENT_ID",
+        "ANTHROPIC_AGENT_ID",
+        "ANTHROPIC_AGENT_VERSION",
+    ]
     if args.direct_dispatch:
         required.extend(["ANTHROPIC_ENVIRONMENT_KEY", "BL_API_KEY", "BL_WORKSPACE"])
     for name in required:
@@ -213,12 +230,23 @@ async def main(argv: list[str] | None = None) -> None:
         raise SystemExit(str(exc)) from exc
 
     budget_cents = None if args.no_budget else args.budget_cents
+    resources = [
+        {
+            "type": "memory_store",
+            "memory_store_id": memory_store_id,
+            "access": "read_write",
+            "instructions": "Use this store for durable preferences and project context.",
+        }
+        for memory_store_id in args.memory_store_id
+    ] or None
     session = await runtime.create_session(
         agent_id=os.environ["ANTHROPIC_AGENT_ID"],
+        agent_version=int(os.environ["ANTHROPIC_AGENT_VERSION"]),
         environment_id=environment_id,
         budget_cents=budget_cents,
         metadata={"cookbook": "blaxel-cma", "scenario": args.scenario},
         title=f"Blaxel CMA: {args.scenario}",
+        resources=resources,
     )
     session_id = as_dict(session).get("id")
     if not session_id:
@@ -261,6 +289,19 @@ async def main(argv: list[str] | None = None) -> None:
     if not ok:
         raise SystemExit("EXAMPLE: FAIL")
     print("\nEXAMPLE: PASS")
+
+    for index, follow_up in enumerate(args.follow_up, start=1):
+        print(f"\nFollow-up {index} on session {session_id}:")
+        follow_up_run = await runtime.run_turn(
+            session_id,
+            follow_up,
+            timeout_seconds=args.timeout_seconds,
+            on_started=dispatch if args.direct_dispatch else None,
+        )
+        if follow_up_run.stop_reason != "end_turn":
+            raise SystemExit(f"FOLLOW-UP: FAIL (stop_reason={follow_up_run.stop_reason})")
+        print(final_agent_text(follow_up_run.events))
+
     print_receipt(await runtime.receipt(session_id))
 
     workspace = os.environ.get("BL_WORKSPACE")
@@ -278,7 +319,7 @@ async def main(argv: list[str] | None = None) -> None:
         print("\n".join(claimed_elsewhere_lines(worker_name(session_id), workspace)))
         return
     process_name = await ant_run_process_name(sandbox) if sandbox else None
-    print("\n".join(proof_lines(worker_name(session_id), process_name or "ant-run-...", workspace)))
+    print("\n".join(proof_lines(worker_name(session_id), process_name or "cma-run-...", workspace)))
     if lookup == "unknown":
         print("  unverified: sandbox lookup failed; check BL_API_KEY or bl login")
 

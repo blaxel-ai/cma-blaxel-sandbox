@@ -96,6 +96,7 @@ async def main(argv: list[str] | None = None) -> None:
         "ANTHROPIC_ENVIRONMENT_ID",
         "ANTHROPIC_ENVIRONMENT_KEY",
         "ANTHROPIC_AGENT_ID",
+        "ANTHROPIC_AGENT_VERSION",
         "BL_API_KEY",
         "BL_WORKSPACE",
     )
@@ -111,6 +112,7 @@ async def main(argv: list[str] | None = None) -> None:
         raise SystemExit(str(exc)) from exc
     session = await runtime.create_session(
         agent_id=os.environ["ANTHROPIC_AGENT_ID"],
+        agent_version=int(os.environ["ANTHROPIC_AGENT_VERSION"]),
         environment_id=environment_id,
         budget_cents=args.budget_cents,
         metadata={"cookbook": "blaxel-cma", "scenario": "preview-resume"},

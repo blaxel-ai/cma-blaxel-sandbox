@@ -33,6 +33,7 @@ def fake_client(
     history_batches=None,
     stream_error=None,
     stats=None,
+    consumed_cents="100",
 ):
     sent = []
     updates = []
@@ -62,6 +63,9 @@ def fake_client(
     async def update(session_id, **kwargs):
         updates.append((session_id, kwargs))
 
+    async def retrieve(session_id):
+        return {"id": session_id, "usage": {"list_cost": {"amount": consumed_cents}}}
+
     async def work_stats(environment_id):
         return stats or {"depth": 0, "pending": 0, "workers_polling": 0}
 
@@ -70,6 +74,7 @@ def fake_client(
             sessions=SimpleNamespace(
                 events=SimpleNamespace(stream=stream, send=send, list=list_events),
                 update=update,
+                retrieve=retrieve,
             ),
             environments=SimpleNamespace(work=SimpleNamespace(stats=work_stats)),
         )
@@ -84,6 +89,26 @@ def test_session_budget_uses_whole_usd_cents():
     }
     with pytest.raises(ValueError):
         session_runtime.session_budget(0)
+
+
+async def test_create_session_forwards_memory_store_resources():
+    calls = []
+
+    async def create(**kwargs):
+        calls.append(kwargs)
+        return {"id": "sesn_x"}
+
+    client = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace(create=create)))
+    runtime = session_runtime.ManagedSessionRuntime(client)
+    resources = [{"type": "memory_store", "memory_store_id": "mem_x", "access": "read_write"}]
+    await runtime.create_session(
+        agent_id="agent_x",
+        agent_version=7,
+        environment_id="env_x",
+        resources=resources,
+    )
+    assert calls[0]["agent"] == {"type": "agent", "id": "agent_x", "version": 7}
+    assert calls[0]["resources"] == resources
 
 
 def test_event_helpers_find_final_text_errors_and_stop_reason():
@@ -122,6 +147,23 @@ async def test_run_turn_streams_then_reconciles_authoritative_history():
     assert result.events == history
     assert result.dispatch_result == "worker-proof"
     assert sent == [("sesn_x", [{"type": "user.message", "content": [{"type": "text", "text": "hello"}]}])]
+
+
+async def test_webhook_turn_waits_through_requires_action():
+    events = [
+        {"id": "running", "type": "session.status_running"},
+        {"id": "tool", "type": "agent.tool_use", "name": "write", "input": {}},
+        {"id": "action", "type": "session.status_idle", "stop_reason": {"type": "requires_action"}},
+        {"id": "result", "type": "user.tool_result", "tool_use_id": "tool", "content": "ok"},
+        {"id": "done", "type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+    ]
+    client, _, _ = fake_client(stream_events=events, history=events)
+    runtime = session_runtime.ManagedSessionRuntime(client, poll_seconds=0)
+
+    result = await runtime.run_turn("sesn_x", "hello")
+
+    assert result.stop_reason == "end_turn"
+    assert result.dispatch_result is None
 
 
 async def test_run_turn_falls_back_to_history_after_stream_disconnect():
@@ -221,11 +263,24 @@ async def test_budget_resume_returns_if_the_larger_budget_is_also_reached():
     assert updates == [("sesn_x", {"budget": session_runtime.session_budget(250)})]
 
 
-async def test_quiet_environment_rejects_other_claimants():
+async def test_quiet_environment_rejects_queued_work():
     client, _, _ = fake_client(stats={"depth": 1, "pending": 0, "workers_polling": 2})
     runtime = session_runtime.ManagedSessionRuntime(client)
-    with pytest.raises(RuntimeError, match="workers_polling=2"):
+    with pytest.raises(RuntimeError, match="depth=1"):
         await runtime.require_quiet_environment("env_x")
+
+
+async def test_quiet_environment_allows_recent_poller_activity():
+    client, _, _ = fake_client(stats={"depth": 0, "pending": 0, "workers_polling": 2})
+    runtime = session_runtime.ManagedSessionRuntime(client)
+    await runtime.require_quiet_environment("env_x")
+
+
+async def test_budget_resume_must_exceed_consumed_cost():
+    client, _, _ = fake_client(consumed_cents="260")
+    runtime = session_runtime.ManagedSessionRuntime(client)
+    with pytest.raises(session_runtime.SessionExecutionError, match="consumed list cost"):
+        await runtime._raise_budget("sesn_x", 250)
 
 
 def test_usage_receipt_captures_cost_timing_and_resolved_model():

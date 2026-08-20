@@ -2,6 +2,6 @@
 # so its runtime deps are required too -- pulled in via the -r line below.
 #   python3 -m pip install --require-hashes -r requirements-dev.lock && python3 -m pytest
 -r orchestrator/requirements.txt
-httpx2>=2.0.0        # FastAPI TestClient transport
+httpx2==2.12.0       # FastAPI TestClient and CMA stream transport; matches runtime images
 pytest>=9.1.1
 pytest-asyncio>=1.4.0

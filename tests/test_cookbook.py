@@ -55,6 +55,18 @@ async def test_cleanup_waits_for_interrupt_to_settle_before_deleting_worker(monk
     async def archive(session_id):
         timeline.append(f"archive:{session_id}")
 
+    async def list_work(environment_id, *, limit):
+        timeline.append(f"list-work:{environment_id}:{limit}")
+        work = SimpleNamespace(
+            id="work_1",
+            state="running",
+            data=SimpleNamespace(type="session", id="sesn_123"),
+        )
+        return SimpleNamespace(data=[work])
+
+    async def stop_work(work_id, *, environment_id, force):
+        timeline.append(f"stop-work:{work_id}:{environment_id}:{force}")
+
     client = SimpleNamespace(
         beta=SimpleNamespace(
             sessions=SimpleNamespace(
@@ -62,13 +74,29 @@ async def test_cleanup_waits_for_interrupt_to_settle_before_deleting_worker(monk
                 events=SimpleNamespace(send=send),
                 archive=archive,
             ),
+            environments=SimpleNamespace(
+                work=SimpleNamespace(list=list_work, stop=stop_work),
+            ),
         ),
     )
     monkeypatch.setattr(cookbook, "_load_dotenv", lambda: None)
-    monkeypatch.setattr(cookbook, "AsyncAnthropic", lambda: client)
+    class EnvironmentClientContext:
+        async def __aenter__(self):
+            return client
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        cookbook,
+        "AsyncAnthropic",
+        lambda **kwargs: EnvironmentClientContext() if kwargs.get("auth_token") else client,
+    )
     monkeypatch.setattr(cookbook.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(cookbook, "_delete_if_present", delete_if_present)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("ANTHROPIC_ENVIRONMENT_ID", "env_test")
+    monkeypatch.setenv("ANTHROPIC_ENVIRONMENT_KEY", "envkey_test")
     monkeypatch.setenv("BL_WORKSPACE", "test")
     args = cookbook.parse_args([
         "cleanup",
@@ -86,28 +114,37 @@ async def test_cleanup_waits_for_interrupt_to_settle_before_deleting_worker(monk
         "retrieve:rescheduling",
         "sleep",
         "retrieve:idle",
+        "list-work:env_test:100",
+        "stop-work:work_1:env_test:True",
         "delete:cma-worker-sesn-123",
         "delete:cma-workspace-sesn-123",
         "archive:sesn_123",
     ]
 
 
-async def test_wait_until_missing_waits_through_a_tombstone(monkeypatch):
+async def test_stop_session_work_accepts_null_page_data():
+    async def list_work(environment_id, *, limit):
+        return SimpleNamespace(data=None)
+
+    client = SimpleNamespace(
+        beta=SimpleNamespace(
+            environments=SimpleNamespace(work=SimpleNamespace(list=list_work)),
+        ),
+    )
+
+    assert await cookbook._stop_session_work(client, "env_x", "sesn_x") == 0
+
+
+async def test_wait_until_missing_accepts_a_terminal_tombstone():
     calls = 0
 
     async def get_resource(name):
         nonlocal calls
         calls += 1
-        if calls < 3:
-            return SimpleNamespace(status="TERMINATED")
-        raise RuntimeError("404 Not Found")
+        return SimpleNamespace(status="TERMINATED")
 
-    async def no_sleep(_):
-        return None
-
-    monkeypatch.setattr(cookbook.asyncio, "sleep", no_sleep)
     await cookbook.wait_until_missing(get_resource, "cma-worker-x", timeout_seconds=1)
-    assert calls == 3
+    assert calls == 1
 
 
 async def test_wait_until_missing_does_not_mask_auth_failure():

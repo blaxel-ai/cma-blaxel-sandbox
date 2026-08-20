@@ -34,6 +34,7 @@ ENV_PATH = REPO / ".env"
 ENV_ID = "ANTHROPIC_ENVIRONMENT_ID"
 ENV_KEY = "ANTHROPIC_ENVIRONMENT_KEY"
 AGENT_ID = "ANTHROPIC_AGENT_ID"
+AGENT_VERSION = "ANTHROPIC_AGENT_VERSION"
 SIGNING_KEY = "ANTHROPIC_WEBHOOK_SIGNING_KEY"
 
 _ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
@@ -108,7 +109,7 @@ def decide(state: dict[str, bool]) -> str:
         return "create_env"
     if not state.get("env_key"):
         return "gate_env_key"
-    if not state.get("agent_id"):
+    if not state.get("agent_id") or not state.get("agent_version"):
         return "provision"
     if not state.get("signing_key"):
         return "gate_webhook"
@@ -120,6 +121,7 @@ def state_from_env(env: dict[str, str]) -> dict[str, bool]:
         "env_id": bool(env.get(ENV_ID)),
         "env_key": bool(env.get(ENV_KEY)),
         "agent_id": bool(env.get(AGENT_ID)),
+        "agent_version": bool(env.get(AGENT_VERSION)),
         "signing_key": bool(env.get(SIGNING_KEY)),
     }
 
@@ -151,6 +153,7 @@ def _print_state(env: dict[str, str]) -> None:
         ("environment", ENV_ID, env.get(ENV_ID, "")),
         ("environment key", ENV_KEY, "set" if env.get(ENV_KEY) else ""),
         ("agent", AGENT_ID, env.get(AGENT_ID, "")),
+        ("agent version", AGENT_VERSION, env.get(AGENT_VERSION, "")),
         ("webhook signing key", SIGNING_KEY, "set" if env.get(SIGNING_KEY) else ""),
     ]
     for label, _key, detail in rows:
@@ -206,10 +209,13 @@ def _do_provision(env: dict[str, str]) -> None:
     print("\n-> creating the agent ...")
     _, out = _capture([sys.executable, str(REPO / "scripts" / "create_agent.py")], env)
     value = extract_export(out, AGENT_ID)
-    if not value:
-        _die("could not read the new agent id from create_agent.py output")
+    version = extract_export(out, AGENT_VERSION)
+    if not value or not version:
+        _die("could not read the new agent id and version from create_agent.py output")
     if append_export(ENV_PATH, AGENT_ID, value):
         print(f"   saved {AGENT_ID} to .env")
+    if append_export(ENV_PATH, AGENT_VERSION, version):
+        print(f"   saved {AGENT_VERSION} to .env")
     env = merged_env(env, ENV_PATH)  # so the proof below sees the new agent id
 
     print("\n-> proving the worker (creates a real session + worker sandbox) ...")

@@ -9,6 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "example"))
 
 run_session = importlib.import_module("run_session")
+direct_dispatch = importlib.import_module("direct_dispatch")
 
 
 def test_default_run_has_a_one_dollar_hard_budget():
@@ -21,6 +22,17 @@ def test_default_run_has_a_one_dollar_hard_budget():
 def test_no_budget_requires_an_explicit_flag():
     args = run_session.parse_args(["--no-budget"])
     assert args.no_budget is True
+
+
+def test_follow_ups_and_memory_store_are_repeatable_session_inputs():
+    args = run_session.parse_args([
+        "--follow-up", "second",
+        "--follow-up", "third",
+        "--memory-store-id", "mem_one",
+        "--memory-store-id", "mem_two",
+    ])
+    assert args.follow_up == ["second", "third"]
+    assert args.memory_store_id == ["mem_one", "mem_two"]
 
 
 def test_resume_budget_must_raise_the_ceiling():
@@ -62,9 +74,9 @@ def test_advisor_scenario_requires_a_real_advisor_thread():
 
 
 def test_proof_lines_include_inspect_command():
-    text = "\n".join(run_session.proof_lines("cma-worker-x", "ant-run-y", "main"))
+    text = "\n".join(run_session.proof_lines("cma-worker-x", "cma-run-y", "main"))
     assert "sandbox: cma-worker-x" in text
-    assert "process: ant-run-y" in text
+    assert "process: cma-run-y" in text
     assert "bl get sandbox cma-worker-x process --workspace main -o json" in text
 
 
@@ -74,6 +86,87 @@ def test_claimed_elsewhere_names_the_shared_environment_invariant():
     assert "NOT found in workspace main" in text
     assert "one Anthropic environment per Blaxel workspace" in text
     assert "--direct-dispatch" in text
+
+
+async def test_direct_dispatch_reuses_live_worker_without_polling(monkeypatch):
+    worker = SimpleNamespace(
+        process=SimpleNamespace(
+            list=lambda: None,
+        ),
+    )
+
+    async def list_processes():
+        return [SimpleNamespace(name="cma-run-work-old-abc", status="running")]
+
+    worker.process.list = list_processes
+
+    async def ready(session_id):
+        return worker
+
+    async def unexpected_poll(**kwargs):
+        raise AssertionError("a live session worker must not claim another work item")
+
+    monkeypatch.setattr(direct_dispatch, "ready_worker_for_session", ready)
+    monkeypatch.setattr(direct_dispatch, "dispatch_available_work", unexpected_poll)
+
+    result = await direct_dispatch.dispatch_until_session_work("sesn_x")
+
+    assert result.process_name == "cma-run-work-old-abc"
+    assert result.work_id == "active"
+
+
+async def test_direct_dispatch_runs_for_initial_and_follow_up_turns(monkeypatch):
+    callbacks = []
+    dispatches = []
+    events = [
+        {"type": "agent.tool_use", "id": "one", "name": "write", "input": {"file_path": "hello.txt"}},
+        {"type": "agent.tool_use", "id": "two", "name": "bash", "input": {"command": "cat /workspace/hello.txt"}},
+        {"type": "agent.message", "content": [{"type": "text", "text": "BLAXEL_CMA_OK"}]},
+        {"type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+    ]
+
+    class FakeRuntime:
+        async def require_quiet_environment(self, environment_id):
+            return None
+
+        async def create_session(self, **kwargs):
+            return {"id": "sesn_x"}
+
+        async def run_turn(self, session_id, message, **kwargs):
+            callback = kwargs.get("on_started")
+            callbacks.append(callback)
+            result = await callback() if callback else None
+            return SimpleNamespace(
+                session_id=session_id,
+                events=events,
+                stop_reason="end_turn",
+                dispatch_result=result,
+            )
+
+        async def receipt(self, session_id):
+            return {}
+
+    async def dispatch(session_id):
+        dispatches.append(session_id)
+        return SimpleNamespace(sandbox_name="cma-worker-sesn-x", process_name="cma-run-x")
+
+    monkeypatch.setattr(run_session, "ManagedSessionRuntime", FakeRuntime)
+    monkeypatch.setattr(run_session, "dispatch_until_session_work", dispatch)
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_ENVIRONMENT_ID",
+        "ANTHROPIC_AGENT_ID",
+        "ANTHROPIC_ENVIRONMENT_KEY",
+        "BL_API_KEY",
+        "BL_WORKSPACE",
+    ):
+        monkeypatch.setenv(name, "test")
+    monkeypatch.setenv("ANTHROPIC_AGENT_VERSION", "1")
+
+    await run_session.main(["--direct-dispatch", "--follow-up", "again"])
+
+    assert all(callback is not None for callback in callbacks)
+    assert dispatches == ["sesn_x", "sesn_x"]
 
 
 async def test_worker_sandbox_lookup_found(monkeypatch):
@@ -114,12 +207,12 @@ async def test_ant_run_process_name_picks_latest_ant_run():
         async def list(self):
             return [
                 SimpleNamespace(name="probe-abc123"),
-                SimpleNamespace(name="ant-run-sesn-x-1"),
-                SimpleNamespace(name="ant-run-sesn-x-2"),
+                SimpleNamespace(name="cma-run-sesn-x-1"),
+                SimpleNamespace(name="cma-run-sesn-x-2"),
             ]
 
     assert await run_session.ant_run_process_name(SimpleNamespace(process=FakeProcessAPI())) == (
-        "ant-run-sesn-x-2"
+        "cma-run-sesn-x-2"
     )
 
 

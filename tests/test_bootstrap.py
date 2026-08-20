@@ -15,16 +15,31 @@ def test_decide_walks_gates_in_order():
     assert bootstrap.decide({}) == "create_env"
     assert bootstrap.decide({"env_id": True}) == "gate_env_key"
     assert bootstrap.decide({"env_id": True, "env_key": True}) == "provision"
-    assert bootstrap.decide({"env_id": True, "env_key": True, "agent_id": True}) == "gate_webhook"
+    assert bootstrap.decide({"env_id": True, "env_key": True, "agent_id": True}) == "provision"
     assert bootstrap.decide(
-        {"env_id": True, "env_key": True, "agent_id": True, "signing_key": True}
+        {"env_id": True, "env_key": True, "agent_id": True, "agent_version": True}
+    ) == "gate_webhook"
+    assert bootstrap.decide(
+        {
+            "env_id": True,
+            "env_key": True,
+            "agent_id": True,
+            "agent_version": True,
+            "signing_key": True,
+        }
     ) == "finalize"
 
 
 def test_state_from_env_treats_empty_as_unset():
     env = {bootstrap.ENV_ID: "env_1", bootstrap.ENV_KEY: "", bootstrap.AGENT_ID: "agent_1"}
     state = bootstrap.state_from_env(env)
-    assert state == {"env_id": True, "env_key": False, "agent_id": True, "signing_key": False}
+    assert state == {
+        "env_id": True,
+        "env_key": False,
+        "agent_id": True,
+        "agent_version": False,
+        "signing_key": False,
+    }
     # an empty value must NOT advance the flow past the env-key gate
     assert bootstrap.decide(state) == "gate_env_key"
 

@@ -32,6 +32,19 @@ def format_agent_create_error(status: int, payload: object, model: str) -> str:
 
 
 def main() -> None:
+    existing_agent_id = env("ANTHROPIC_AGENT_ID")
+    if existing_agent_id:
+        status, payload = request_json("GET", f"/v1/agents/{existing_agent_id}")
+        if status >= 300:
+            raise SetupError(f"agent retrieve failed with HTTP {status}: {payload}")
+        agent_id = extract_id(payload, "agent_")
+        version = payload.get("version") if isinstance(payload, dict) else None
+        if not isinstance(version, int):
+            raise SetupError(f"agent retrieve response missing integer version: {payload}")
+        print_export("ANTHROPIC_AGENT_ID", agent_id)
+        print_export("ANTHROPIC_AGENT_VERSION", str(version))
+        return
+
     name = env("ANTHROPIC_AGENT_NAME", default="Coding Assistant")
     model = env("ANTHROPIC_AGENT_MODEL", default=DEFAULT_AGENT_MODEL)
     inference_geo = env("ANTHROPIC_INFERENCE_GEO")
@@ -50,7 +63,18 @@ def main() -> None:
     )
     if status >= 300:
         raise SetupError(format_agent_create_error(status, payload, str(model)))
-    print_export("ANTHROPIC_AGENT_ID", extract_id(payload, "agent_"))
+    agent_id = extract_id(payload, "agent_")
+    version = payload.get("version") if isinstance(payload, dict) else None
+    if not isinstance(version, int):
+        cleanup_status, cleanup_payload = request_json(
+            "POST", f"/v1/agents/{agent_id}/archive"
+        )
+        cleanup = "archived" if cleanup_status < 300 else f"archive failed: {cleanup_payload}"
+        raise SetupError(
+            f"agent create response missing integer version; incomplete {agent_id} {cleanup}: {payload}"
+        )
+    print_export("ANTHROPIC_AGENT_ID", agent_id)
+    print_export("ANTHROPIC_AGENT_VERSION", str(version))
 
 
 if __name__ == "__main__":

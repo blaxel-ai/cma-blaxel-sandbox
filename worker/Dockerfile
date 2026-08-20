@@ -27,21 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && npm install -g pnpm \
   && rm -rf /var/lib/apt/lists/*
 
-ARG ANT_VERSION=1.22.1
-ARG TARGETARCH=amd64
-ARG ANT_SHA256_AMD64=f8645bfe4be90e6a62cf824687ca4ede8dc061942eeb97d2650d110a872f4555
-ARG ANT_SHA256_ARM64=b1c6dbf312b5ba457b93d40409d7613502a47fb61198780cbf778ff436f06d3c
-RUN set -eux; \
-    ARCH=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo amd64); \
-    CHECKSUM=$([ "$TARGETARCH" = "arm64" ] && echo "$ANT_SHA256_ARM64" || echo "$ANT_SHA256_AMD64"); \
-    ARCHIVE=$(mktemp); \
-    curl -fsSL \
-      "https://github.com/anthropics/anthropic-cli/releases/download/v${ANT_VERSION}/ant_${ANT_VERSION}_linux_${ARCH}.tar.gz" \
-      -o "$ARCHIVE"; \
-    echo "$CHECKSUM  $ARCHIVE" | sha256sum -c -; \
-    tar -xzf "$ARCHIVE" -C /usr/local/bin ant; \
-    rm -f "$ARCHIVE"; \
-    chmod +x /usr/local/bin/ant
+COPY requirements.lock /worker/requirements.lock
+RUN python3 -m pip install --no-cache-dir --require-hashes -r /worker/requirements.lock
 
 ENV PATH="/usr/local/bin:${PATH}" \
     CMA_WORKER_PROFILE=quickstart
@@ -84,9 +71,9 @@ RUN set -eux; \
 FROM ${WORKER_PROFILE} AS final
 
 COPY entrypoint.sh /entrypoint.sh
-COPY smoke.sh /worker/smoke.sh
-RUN chmod +x /entrypoint.sh /worker/smoke.sh \
-  && mkdir -p /workspace /mnt/session/outputs
+COPY smoke.sh worker.py /worker/
+RUN chmod +x /entrypoint.sh /worker/smoke.sh /worker/worker.py \
+  && mkdir -p /workspace /mnt/memory
 
 WORKDIR /workspace
 ENV HOME=/workspace

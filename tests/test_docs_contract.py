@@ -14,11 +14,11 @@ def test_public_docs_use_sonnet_5_as_the_default():
     assert "| Model | `claude-sonnet-5` |" in read("README.md")
 
 
-def test_public_docs_do_not_offer_unsupported_self_hosted_resources():
+def test_public_docs_distinguish_supported_self_hosted_resources():
     combined = "\n".join(read(name) for name in ("README.md", "GUIDE.md", "AGENTS.md", "llms.txt"))
-    assert "--github-repository-url" not in combined
-    assert "ANTHROPIC_GITHUB_TOKEN" not in combined
-    assert "Self-hosted sessions reject" in combined or "Self-hosted sessions do not accept" in combined
+    assert "memory_store" in combined
+    assert "memory stores" in combined
+    assert "do not mount uploaded files or GitHub repositories" in combined
 
 
 def test_readme_embeds_the_checked_in_architecture_image():
@@ -41,8 +41,11 @@ def test_locked_install_is_the_primary_install_path():
     assert "--require-hashes -r requirements-dev.lock" in read("requirements-dev.txt")
 
 
-def test_worker_verifies_the_anthropic_cli_archive():
+def test_worker_pins_the_sdk_environment_worker():
     dockerfile = read("worker/Dockerfile")
-    assert "ANT_SHA256_AMD64=" in dockerfile
-    assert "ANT_SHA256_ARM64=" in dockerfile
-    assert "sha256sum -c -" in dockerfile
+    worker = read("worker/worker.py")
+    assert "--require-hashes -r /worker/requirements.lock" in dockerfile
+    assert "anthropic>=1,<2" in read("worker/requirements.txt")
+    assert "EnvironmentWorker" in worker
+    assert "worker.handle_item(" in worker
+    assert "work_secret=work_secret" in worker

@@ -15,11 +15,11 @@ Anthropic hosts the agent loop, session state, event history, skills, budgets, a
 - Default model: `claude-sonnet-5`.
 - Default session budget: 100 US cents.
 - Anthropic beta: `managed-agents-2026-04-01`.
-- Anthropic Python SDK: `0.121.0`.
-- Anthropic worker CLI: `1.22.1`.
+- Anthropic Python SDK: `1.x`.
+- Anthropic CLI: `1.26.1` for local administration; workers use the SDK.
 - Blaxel Python SDK: `0.4.1`.
 - Event handling: SDK stream, `session.error` failure, complete paginated reconciliation.
-- Self-hosted session `resources`: unsupported. Use agent skills or metadata-driven staging.
+- Self-hosted session resources: memory stores are supported by the SDK worker; stage file and repository inputs in the application.
 
 ## Key commands
 
@@ -39,14 +39,14 @@ python3 cookbook.py cleanup --session sesn_...
 
 - `EXAMPLE: PASS` proves deterministic session behavior.
 - The usage receipt proves resolved model, tokens, list cost, and active time.
-- A matching `cma-worker-*` and `ant-run-*` process proves Blaxel attribution.
+- A matching `cma-worker-*` and `cma-run-*` process proves Blaxel attribution.
 - Use one claimant per self-hosted environment during proof.
 - Do not treat transcript success alone as worker attribution.
 
 ## Safety
 
 - Keep `ANTHROPIC_API_KEY` local.
-- The environment key enters the worker and is visible to agent shell commands.
+- The SDK worker prefers a session-scoped work secret, retains the environment key as fallback, and scrubs both from agent-run bash.
 - File tools stay under `/workspace`; bash remains a shell inside the container.
 - Private previews are the default. Public preview requires `--public-preview`.
 - Every session has a hard budget unless `--no-budget` is explicit.
@@ -56,7 +56,8 @@ python3 cookbook.py cleanup --session sesn_...
 ## Key files
 
 - `example/session_runtime.py`: streaming, pagination, budgets, errors, timeouts, receipts.
-- `example/run_session.py`: verified hello, advisor, and skill scenarios.
+- `example/run_session.py`: verified hello, advisor, skill, memory, and multi-turn scenarios.
+- `example/ag-ui/`: official AG-UI adapter wiring with one thread per managed session.
 - `orchestrator/app.py`: signed webhook, bounded dispatch, recovery, health, readiness.
 - `worker/Dockerfile`: quickstart and full profiles.
 - `cookbook.py`: status and exact cleanup.
