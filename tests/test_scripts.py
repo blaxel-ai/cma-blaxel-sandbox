@@ -97,6 +97,7 @@ def test_preflight_summarizes_json_command_output():
 
 
 def test_create_agent_exports_id_and_integer_version(monkeypatch, capsys):
+    monkeypatch.delenv("ANTHROPIC_AGENT_ID", raising=False)
     monkeypatch.setattr(
         create_agent,
         "request_json",
@@ -108,7 +109,23 @@ def test_create_agent_exports_id_and_integer_version(monkeypatch, capsys):
     assert "export ANTHROPIC_AGENT_VERSION=7" in output
 
 
+def test_create_agent_recovers_version_for_existing_agent(monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_AGENT_ID", "agent_existing")
+    monkeypatch.setattr(
+        create_agent,
+        "request_json",
+        lambda method, path, **kwargs: (200, {"id": "agent_existing", "version": 9}),
+    )
+
+    create_agent.main()
+
+    output = capsys.readouterr().out
+    assert "export ANTHROPIC_AGENT_ID=agent_existing" in output
+    assert "export ANTHROPIC_AGENT_VERSION=9" in output
+
+
 def test_create_agent_archives_incomplete_response(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_AGENT_ID", raising=False)
     calls = []
 
     def request(method, path, **kwargs):

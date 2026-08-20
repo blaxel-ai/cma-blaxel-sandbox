@@ -109,7 +109,7 @@ def decide(state: dict[str, bool]) -> str:
         return "create_env"
     if not state.get("env_key"):
         return "gate_env_key"
-    if not state.get("agent_id"):
+    if not state.get("agent_id") or not state.get("agent_version"):
         return "provision"
     if not state.get("signing_key"):
         return "gate_webhook"
@@ -121,6 +121,7 @@ def state_from_env(env: dict[str, str]) -> dict[str, bool]:
         "env_id": bool(env.get(ENV_ID)),
         "env_key": bool(env.get(ENV_KEY)),
         "agent_id": bool(env.get(AGENT_ID)),
+        "agent_version": bool(env.get(AGENT_VERSION)),
         "signing_key": bool(env.get(SIGNING_KEY)),
     }
 
@@ -152,6 +153,7 @@ def _print_state(env: dict[str, str]) -> None:
         ("environment", ENV_ID, env.get(ENV_ID, "")),
         ("environment key", ENV_KEY, "set" if env.get(ENV_KEY) else ""),
         ("agent", AGENT_ID, env.get(AGENT_ID, "")),
+        ("agent version", AGENT_VERSION, env.get(AGENT_VERSION, "")),
         ("webhook signing key", SIGNING_KEY, "set" if env.get(SIGNING_KEY) else ""),
     ]
     for label, _key, detail in rows:

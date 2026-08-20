@@ -147,7 +147,7 @@ async def test_run_turn_streams_then_reconciles_authoritative_history():
     assert sent == [("sesn_x", [{"type": "user.message", "content": [{"type": "text", "text": "hello"}]}])]
 
 
-async def test_self_hosted_turn_waits_through_requires_action():
+async def test_webhook_turn_waits_through_requires_action():
     events = [
         {"id": "running", "type": "session.status_running"},
         {"id": "tool", "type": "agent.tool_use", "name": "write", "input": {}},
@@ -158,13 +158,10 @@ async def test_self_hosted_turn_waits_through_requires_action():
     client, _, _ = fake_client(stream_events=events, history=events)
     runtime = session_runtime.ManagedSessionRuntime(client, poll_seconds=0)
 
-    async def dispatch():
-        return "worker-proof"
-
-    result = await runtime.run_turn("sesn_x", "hello", on_started=dispatch)
+    result = await runtime.run_turn("sesn_x", "hello")
 
     assert result.stop_reason == "end_turn"
-    assert result.dispatch_result == "worker-proof"
+    assert result.dispatch_result is None
 
 
 async def test_run_turn_falls_back_to_history_after_stream_disconnect():

@@ -32,6 +32,19 @@ def format_agent_create_error(status: int, payload: object, model: str) -> str:
 
 
 def main() -> None:
+    existing_agent_id = env("ANTHROPIC_AGENT_ID")
+    if existing_agent_id:
+        status, payload = request_json("GET", f"/v1/agents/{existing_agent_id}")
+        if status >= 300:
+            raise SetupError(f"agent retrieve failed with HTTP {status}: {payload}")
+        agent_id = extract_id(payload, "agent_")
+        version = payload.get("version") if isinstance(payload, dict) else None
+        if not isinstance(version, int):
+            raise SetupError(f"agent retrieve response missing integer version: {payload}")
+        print_export("ANTHROPIC_AGENT_ID", agent_id)
+        print_export("ANTHROPIC_AGENT_VERSION", str(version))
+        return
+
     name = env("ANTHROPIC_AGENT_NAME", default="Coding Assistant")
     model = env("ANTHROPIC_AGENT_MODEL", default=DEFAULT_AGENT_MODEL)
     inference_geo = env("ANTHROPIC_INFERENCE_GEO")

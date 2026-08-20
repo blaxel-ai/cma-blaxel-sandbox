@@ -269,7 +269,6 @@ class ManagedSessionRuntime:
         handled_budget_events: set[str],
         stall_timeout_seconds: float | None,
         history: list[Any],
-        await_requires_action: bool,
     ) -> tuple[list[Any], str, bool]:
         events = list(history)
         last_count = len(events)
@@ -341,7 +340,7 @@ class ManagedSessionRuntime:
                     print(f"  budget raised to {resume_budget_cents} cents; session resumed")
                 else:
                     return events, reason, budget_raised
-            elif reason == "requires_action" and await_requires_action:
+            elif reason == "requires_action":
                 await asyncio.sleep(self.poll_seconds)
                 continue
             elif reason:
@@ -426,7 +425,7 @@ class ManagedSessionRuntime:
                                 )
                                 print(f"  budget raised to {resume_budget_cents} cents; session resumed")
                                 continue
-                            if reason == "requires_action" and on_started:
+                            if reason == "requires_action":
                                 continue
                             if reason:
                                 break
@@ -450,7 +449,6 @@ class ManagedSessionRuntime:
                     handled_budget_events=handled_budget_events,
                     stall_timeout_seconds=stall_timeout_seconds,
                     history=baseline,
-                    await_requires_action=on_started is not None,
                 )
                 if dispatch_task:
                     dispatch_result = await dispatch_task

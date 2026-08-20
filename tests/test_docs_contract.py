@@ -47,4 +47,5 @@ def test_worker_pins_the_sdk_environment_worker():
     assert "--require-hashes -r /worker/requirements.lock" in dockerfile
     assert "anthropic>=1,<2" in read("worker/requirements.txt")
     assert "EnvironmentWorker" in worker
-    assert "worker.handle_item()" in worker
+    assert "worker.handle_item(" in worker
+    assert "work_secret=work_secret" in worker

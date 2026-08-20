@@ -28,13 +28,17 @@ def duration_seconds(value: str) -> float | None:
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    async with AsyncAnthropic(auth_token=os.environ["ANTHROPIC_ENVIRONMENT_KEY"]) as client:
+    environment_key = os.environ.pop("ANTHROPIC_ENVIRONMENT_KEY")
+    work_secret = os.environ.pop("ANTHROPIC_WORK_SECRET", None)
+    async with AsyncAnthropic(auth_token=environment_key) as client:
         worker = EnvironmentWorker(
             client,
             workdir="/workspace",
             max_idle=duration_seconds(os.environ.get("ANT_MAX_IDLE", "60s")),
         )
-        task = asyncio.create_task(worker.handle_item())
+        task = asyncio.create_task(
+            worker.handle_item(environment_key=environment_key, work_secret=work_secret)
+        )
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, task.cancel)
