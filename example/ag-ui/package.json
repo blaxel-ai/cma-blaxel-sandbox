@@ -23,5 +23,11 @@
     "typescript": "6.0.3",
     "vite": "8.0.16"
   },
-  "overrides": {"rxjs": "7.8.1", "undici": "6.28.0"}
+  "overrides": {
+    "rxjs": "7.8.1",
+    "undici": "6.28.0",
+    "fast-uri": "3.1.6",
+    "hono": "4.13.5",
+    "qs": "6.16.0"
+  }
 }
