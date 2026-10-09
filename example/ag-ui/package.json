@@ -27,7 +27,9 @@
     "rxjs": "7.8.1",
     "undici": "6.28.1",
     "fast-uri": "3.1.8",
-    "hono": "4.13.5",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "hono": "4.13.7",
+    "katex": "0.18.2",
     "qs": "6.16.0"
   }
 }
