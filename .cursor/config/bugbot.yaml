@@ -1,0 +1,5 @@
+# Bugbot reviews each PR once, on the first push, instead of on every push.
+# Comment `bugbot run` on a PR to request another review.
+version: 1
+triggers:
+  frequency: oncePerPr
