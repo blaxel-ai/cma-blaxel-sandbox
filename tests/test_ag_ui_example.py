@@ -5,10 +5,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1] / "example" / "ag-ui"
 
 
+def _versions(spec):
+    # npm overrides can nest (`"express@4.22.2": {"body-parser": "1.20.9"}`); every leaf must still be exact.
+    if isinstance(spec, dict):
+        for value in spec.values():
+            yield from _versions(value)
+    else:
+        yield spec
+
+
 def test_dependencies_are_exactly_pinned():
     package = json.loads((ROOT / "package.json").read_text())
     for group in ("dependencies", "devDependencies", "overrides"):
-        assert all(not version.startswith(("^", "~")) for version in package[group].values())
+        assert all(not version.startswith(("^", "~")) for version in _versions(package[group]))
     assert package["overrides"]["rxjs"] == "7.8.1"
 
 
