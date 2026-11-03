@@ -34,6 +34,17 @@
     "@azure/msal-node": "7.1.0",
     "follow-redirects": "1.16.2",
     "graphql-scalars": "2.0.1",
-    "express@4.22.2": { "body-parser": "1.20.9" }
+    "express@4.22.2": { "body-parser": "1.20.9" },
+    "@a2ui/web_core": { "zod": "4.6.7" },
+    "@ag-ui/client": { "zod": "4.6.7" },
+    "@ag-ui/core": { "zod": "4.6.7" },
+    "@ag-ui/mcp-middleware": { "zod": "4.6.7" },
+    "@copilotkit/a2ui-renderer": { "zod": "4.6.7" },
+    "@copilotkit/channels-slack": { "zod": "4.6.7" },
+    "@copilotkit/channels-teams": { "zod": "4.6.7" },
+    "@copilotkit/runtime": { "zod": "4.6.7" },
+    "@copilotkit/shared": { "zod": "4.6.7" },
+    "@microsoft/agents-activity": { "zod": "4.6.7" },
+    "@microsoft/agents-hosting": { "zod": "4.6.7" }
   }
 }
