@@ -17,7 +17,7 @@ Anthropic hosts the agent loop, session state, event history, skills, budgets, a
 - Anthropic beta: `managed-agents-2026-04-01`.
 - Anthropic Python SDK: `1.x`.
 - Anthropic CLI: `1.26.1` for local administration; workers use the SDK.
-- Blaxel Python SDK: `0.4.1`.
+- Blaxel Python SDK: `0.4.22`.
 - Event handling: SDK stream, `session.error` failure, complete paginated reconciliation.
 - Self-hosted session resources: memory stores are supported by the SDK worker; stage file and repository inputs in the application.
 
