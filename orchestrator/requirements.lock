@@ -30,9 +30,9 @@ attrs==26.1.0 \
     #   blaxel
     #   jsonschema
     #   referencing
-blaxel==0.4.1 \
-    --hash=sha256:47ab505cb4eb115176d75c004680179934fd249b45bf3c1de74c01a64b6377f1 \
-    --hash=sha256:d46250cbd8f1178bd269319e07c59b786871428a473dd34ae029c920826700d9
+blaxel==0.4.22 \
+    --hash=sha256:052909ab5691a16f11c2665a06b58270b8831539f5041771cecb5e8b4da89576 \
+    --hash=sha256:af2d7c302a566358decb49d9e826062d08171e601b2d66e8308242b22d1f95de
     # via -r orchestrator/requirements.txt
 certifi==2026.7.22 \
     --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \

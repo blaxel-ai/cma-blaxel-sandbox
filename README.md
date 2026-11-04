@@ -285,7 +285,7 @@ This cookbook targets:
 - Anthropic Managed Agents beta header `managed-agents-2026-04-01`.
 - Anthropic Python SDK `1.x`.
 - Anthropic CLI `1.26.1` for local administration; sandbox workers use the SDK.
-- Blaxel Python SDK `0.4.1`.
+- Blaxel Python SDK `0.4.22`.
 - Claude Sonnet 5 model ID `claude-sonnet-5`.
 
 Primary references: [Managed Agents sessions](https://platform.claude.com/docs/en/managed-agents/sessions), [events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming), [self-hosted sandboxes](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes), [memory](https://platform.claude.com/docs/en/managed-agents/memory), [Agent Skills](https://platform.claude.com/docs/en/managed-agents/skills), [multiagent orchestration](https://platform.claude.com/docs/en/managed-agents/multiagent-orchestration), and [Claude Sonnet 5](https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5).
